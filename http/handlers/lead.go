@@ -1,0 +1,513 @@
+package handlers
+
+import (
+	"admission-module/db"
+	"admission-module/http/services"
+	"admission-module/models"
+	"admission-module/utils"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"time"
+)
+
+// LeadService encapsulates lead management operations
+type LeadService struct {
+	db *sql.DB
+}
+
+func NewLeadService(database *sql.DB) *LeadService {
+	return &LeadService{db: database}
+}
+
+// UploadLeads handles bulk lead upload via Excel file
+func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		log.Printf("Error getting form file: %v", err)
+		respondError(w, "Invalid file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	log.Printf("Processing file upload: %s", header.Filename)
+
+	// Create temp file with proper cleanup
+	tempFile, err := os.CreateTemp("", "leads_*.xlsx")
+	if err != nil {
+		log.Printf("Error creating temp file: %v", err)
+		respondError(w, "Error processing file", http.StatusInternalServerError)
+		return
+	}
+	tempFilePath := tempFile.Name()
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+	}()
+
+	if _, err = io.Copy(tempFile, file); err != nil {
+		log.Printf("Error copying file: %v", err)
+		respondError(w, "Error saving file", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tempFile.Close(); err != nil {
+		log.Printf("Error closing temp file: %v", err)
+	}
+
+	leads, err := services.ParseExcel(tempFilePath)
+	if err != nil {
+		log.Printf("Error parsing Excel: %v", err)
+		respondError(w, "Error parsing Excel: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Remove duplicates within the uploaded file
+	leads = utils.DeduplicateLeads(leads)
+
+	// Process leads with proper error tracking
+	successCount := 0
+	failedLeads := []map[string]string{}
+
+	for i, lead := range leads {
+		if err := s.processAndInsertLead(ctx, &lead); err != nil {
+			log.Printf("Failed to process lead %d (%s): %v", i+1, lead.Email, err)
+			failedLeads = append(failedLeads, map[string]string{
+				"row":   fmt.Sprintf("%d", i+2), // +2 for header row
+				"email": lead.Email,
+				"phone": lead.Phone,
+				"error": err.Error(),
+			})
+			continue
+		}
+		successCount++
+	}
+
+	log.Printf("Bulk upload completed: %d successful, %d failed", successCount, len(failedLeads))
+
+	response := map[string]interface{}{
+		"message":       fmt.Sprintf("Successfully uploaded %d leads", successCount),
+		"success_count": successCount,
+		"failed_count":  len(failedLeads),
+		"total_count":   len(leads),
+	}
+
+	if len(failedLeads) > 0 {
+		response["failed_leads"] = failedLeads
+	}
+
+	respondJSON(w, http.StatusOK, response)
+}
+
+// processAndInsertLead handles the complete lead creation process in a transaction
+func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lead) error {
+	// Validate lead data
+	if err := validateLead(lead); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Start transaction
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Check for duplicate (within transaction)
+	exists, err := s.leadExistsTx(ctx, tx, lead.Email, lead.Phone)
+	if err != nil {
+		return fmt.Errorf("error checking duplicate: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("lead already exists with this email or phone")
+	}
+
+	// Assign counsellor with row lock
+	if err := s.assignCounsellorTx(ctx, tx, lead); err != nil {
+		return fmt.Errorf("error assigning counsellor: %w", err)
+	}
+
+	// Insert lead
+	leadID, err := s.insertLeadTx(ctx, tx, lead)
+	if err != nil {
+		return fmt.Errorf("error inserting lead: %w", err)
+	}
+	lead.ID = int(leadID)
+
+	// Update counsellor count atomically
+	if lead.CounsellorID != nil {
+		if err := s.updateCounsellorCountTx(ctx, tx, *lead.CounsellorID); err != nil {
+			return fmt.Errorf("error updating counsellor count: %w", err)
+		}
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	log.Printf("Lead created successfully: ID=%d, Email=%s, Counsellor=%v",
+		leadID, lead.Email, lead.CounsellorID)
+
+	return nil
+}
+
+// GetLeads retrieves leads with optional filters
+func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse and validate query parameters
+	timeParams, err := utils.ParseTimeFilters(r)
+	if err != nil {
+		respondError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Build query with filters
+	query := `
+		SELECT 
+			id, name, email, phone, education, lead_source, 
+			counsellor_id, payment_status, meet_link, 
+			application_status, created_at, updated_at 
+		FROM leads 
+		WHERE 1=1`
+
+	args := []interface{}{}
+	argCount := 0
+
+	if timeParams.CreatedAfter != nil {
+		argCount++
+		query += fmt.Sprintf(" AND created_at >= $%d", argCount)
+		args = append(args, *timeParams.CreatedAfter)
+	}
+
+	if timeParams.CreatedBefore != nil {
+		argCount++
+		query += fmt.Sprintf(" AND created_at <= $%d", argCount)
+		args = append(args, *timeParams.CreatedBefore)
+	}
+
+	query += " ORDER BY id ASC"
+
+	// Execute query
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		log.Printf("Error fetching leads: %v", err)
+		respondError(w, "Error fetching leads", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	leads := []models.Lead{}
+	for rows.Next() {
+		lead, err := utils.ScanLead(rows)
+		if err != nil {
+			log.Printf("Error scanning lead: %v", err)
+			respondError(w, "Error processing leads", http.StatusInternalServerError)
+			return
+		}
+		leads = append(leads, lead)
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating leads: %v", err)
+		respondError(w, "Error processing leads", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Retrieved %d leads", len(leads))
+
+	// Convert leads to response format
+	leadResponses := utils.ConvertLeadsToResponse(leads)
+
+	response := GetLeadsResponse{
+		Status:  "success",
+		Message: fmt.Sprintf("Retrieved %d leads successfully", len(leads)),
+		Count:   len(leads),
+		Data:    leadResponses,
+	}
+	respondJSON(w, http.StatusOK, response)
+}
+
+// CreateLead handles single lead creation
+func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+
+	var lead models.Lead
+	if err := json.NewDecoder(r.Body).Decode(&lead); err != nil {
+		log.Printf("Error decoding JSON: %v", err)
+		respondError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Process and insert lead
+	if err := s.processAndInsertLead(ctx, &lead); err != nil {
+		log.Printf("Error creating lead: %v", err)
+
+		// Determine appropriate status code based on error
+		statusCode := http.StatusInternalServerError
+		if err.Error() == "lead already exists with this email or phone" {
+			statusCode = http.StatusConflict
+		} else if err.Error()[:10] == "validation" {
+			statusCode = http.StatusBadRequest
+		}
+
+		respondError(w, err.Error(), statusCode)
+		return
+	}
+
+	// Get counsellor name for response
+	counsellorName := s.getCounsellorName(ctx, lead.CounsellorID)
+
+	response := CreateLeadResponse{
+		Message:        "Lead created successfully",
+		StudentID:      int64(lead.ID),
+		CounsellorName: counsellorName,
+		Email:          lead.Email,
+	}
+
+	respondJSON(w, http.StatusCreated, response)
+}
+
+// Transaction-safe helper methods
+
+func (s *LeadService) assignCounsellorTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) error {
+	if lead.CounsellorID != nil {
+		return nil // Already assigned
+	}
+
+	counsellorID, err := s.getAvailableCounsellorIDTx(ctx, tx, lead.LeadSource)
+	if err != nil {
+		return err
+	}
+
+	lead.CounsellorID = counsellorID
+
+	if counsellorID == nil {
+		log.Printf("Warning: No available counsellor for lead source: %s", lead.LeadSource)
+	}
+
+	return nil
+}
+
+func (s *LeadService) getAvailableCounsellorIDTx(ctx context.Context, tx *sql.Tx, leadSource string) (*int64, error) {
+	var query string
+
+	switch leadSource {
+	case utils.SourceWebsite:
+		query = `SELECT id FROM counsellors 
+				 WHERE assigned_count < max_capacity 
+				 ORDER BY assigned_count ASC, id ASC 
+				 LIMIT 1 FOR UPDATE SKIP LOCKED`
+	case utils.SourceReferral:
+		query = `SELECT id FROM counsellors 
+				 WHERE is_referral_enabled = true 
+				 AND assigned_count < max_capacity 
+				 ORDER BY assigned_count ASC, id ASC 
+				 LIMIT 1 FOR UPDATE SKIP LOCKED`
+	default:
+		query = `SELECT id FROM counsellors 
+				 WHERE assigned_count < max_capacity 
+				 ORDER BY assigned_count ASC, id ASC 
+				 LIMIT 1 FOR UPDATE SKIP LOCKED`
+	}
+
+	var counsellorID int64
+	err := tx.QueryRowContext(ctx, query).Scan(&counsellorID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // No available counsellor
+		}
+		return nil, err
+	}
+
+	return &counsellorID, nil
+}
+
+func (s *LeadService) leadExistsTx(ctx context.Context, tx *sql.Tx, email, phone string) (bool, error) {
+	var count int
+	query := "SELECT COUNT(*) FROM leads WHERE email = $1 OR phone = $2"
+	err := tx.QueryRowContext(ctx, query, email, phone).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *LeadService) insertLeadTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) (int64, error) {
+	now := time.Now()
+
+	query := `
+		INSERT INTO leads (
+			name, email, phone, education, lead_source, 
+			counsellor_id, payment_status, meet_link, 
+			application_status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id`
+
+	var leadID int64
+	err := tx.QueryRowContext(
+		ctx,
+		query,
+		lead.Name,
+		lead.Email,
+		lead.Phone,
+		lead.Education,
+		lead.LeadSource,
+		lead.CounsellorID,
+		lead.PaymentStatus,
+		lead.MeetLink,
+		lead.ApplicationStatus,
+		now,
+		now,
+	).Scan(&leadID)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return leadID, nil
+}
+
+func (s *LeadService) updateCounsellorCountTx(ctx context.Context, tx *sql.Tx, counsellorID int64) error {
+	query := "UPDATE counsellors SET assigned_count = assigned_count + 1 WHERE id = $1"
+	result, err := tx.ExecContext(ctx, query, counsellorID)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("counsellor not found: %d", counsellorID)
+	}
+
+	return nil
+}
+
+func (s *LeadService) getCounsellorName(ctx context.Context, counsellorID *int64) string {
+	if counsellorID == nil {
+		return "Not Assigned"
+	}
+
+	var name string
+	query := "SELECT name FROM counsellors WHERE id = $1"
+	err := s.db.QueryRowContext(ctx, query, *counsellorID).Scan(&name)
+	if err != nil {
+		log.Printf("Error fetching counsellor name for ID %d: %v", *counsellorID, err)
+		return "Unknown"
+	}
+	return name
+}
+
+// Validation functions
+
+func validateLead(lead *models.Lead) error {
+	if err := utils.ValidateName(lead.Name); err != nil {
+		return err
+	}
+
+	if err := utils.ValidateEmail(lead.Email); err != nil {
+		return err
+	}
+
+	if err := utils.ValidatePhone(lead.Phone); err != nil {
+		return err
+	}
+
+	if err := utils.ValidateEducation(lead.Education); err != nil {
+		return err
+	}
+
+	if err := utils.ValidateLeadSource(lead.LeadSource); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Helper functions
+
+// Response types and helpers
+
+type GetLeadsResponse struct {
+	Status  string                `json:"status"`
+	Message string                `json:"message"`
+	Count   int                   `json:"count"`
+	Data    []models.LeadResponse `json:"data"`
+}
+
+type CreateLeadResponse struct {
+	Message        string `json:"message"`
+	StudentID      int64  `json:"student_id"`
+	CounsellorName string `json:"counsellor_name"`
+	Email          string `json:"email"`
+}
+
+// Response helper wrappers (for backward compatibility)
+func respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+	}
+}
+
+func respondError(w http.ResponseWriter, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// Public handler wrappers (for backward compatibility with existing routes)
+var service *LeadService
+
+func InitHandlers(database *sql.DB) {
+	service = NewLeadService(database)
+}
+
+func UploadLeads(w http.ResponseWriter, r *http.Request) {
+	if service == nil {
+		service = NewLeadService(db.DB)
+	}
+	service.UploadLeads(w, r)
+}
+
+func GetLeads(w http.ResponseWriter, r *http.Request) {
+	if service == nil {
+		service = NewLeadService(db.DB)
+	}
+	service.GetLeads(w, r)
+}
+
+func CreateLead(w http.ResponseWriter, r *http.Request) {
+	if service == nil {
+		service = NewLeadService(db.DB)
+	}
+	service.CreateLead(w, r)
+}

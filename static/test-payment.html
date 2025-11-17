@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Payment Integration</title>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input {
+            padding: 8px;
+            width: 200px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #response {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Payment Integration</h1>
+    
+    <div class="input-group">
+        <label for="studentId">Student ID:</label>
+        <input type="number" id="studentId" value="1">
+    </div>
+    
+    <div class="input-group">
+        <label for="amount">Amount (INR):</label>
+        <input type="number" id="amount" value="1000">
+    </div>
+    
+    <button onclick="initiatePayment()">Make Payment</button>
+    
+    <div id="response"></div>
+
+    <script>
+        async function initiatePayment() {
+            const studentId = document.getElementById('studentId').value;
+            const amount = document.getElementById('amount').value;
+            const responseDiv = document.getElementById('response');
+
+            try {
+                // First, call your backend to create the order
+                const response = await fetch('http://localhost:8080/initiate-payment', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        student_id: parseInt(studentId),
+                        amount: parseFloat(amount)
+                    })
+                });
+                
+                const orderData = await response.json();
+                responseDiv.textContent = 'Order created: ' + JSON.stringify(orderData, null, 2);
+
+                // Then open Razorpay payment form
+                const options = {
+                    key: 'rzp_test_RcoABp810ZglpG', // Your Razorpay Key ID
+                    amount: orderData.amount * 100, // Amount in paise
+                    currency: orderData.currency,
+                    name: "Sai Admissions",
+                    description: "Admission Fee Payment",
+                    order_id: orderData.order_id,
+                    handler: async function (response) {
+                        // Verify payment after successful payment
+                        responseDiv.textContent = 'Processing payment...';
+                        
+                        const verifyResponse = await fetch('http://localhost:8080/verify-payment', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                order_id: response.razorpay_order_id,
+                                payment_id: response.razorpay_payment_id,
+                                razorpay_signature: response.razorpay_signature
+                            })
+                        });
+                        
+                        const verifyData = await verifyResponse.json();
+                        responseDiv.textContent = 'Payment verified: ' + JSON.stringify(verifyData, null, 2);
+                    },
+                    prefill: {
+                        name: "Test Student",
+                        email: "student@example.com",
+                        contact: "9999999999"
+                    },
+                    theme: {
+                        color: "#3399cc"
+                    }
+                };
+
+                const rzp = new Razorpay(options);
+                rzp.open();
+                
+                rzp.on('payment.failed', function (response){
+                    responseDiv.textContent = 'Payment failed: ' + JSON.stringify(response.error, null, 2);
+                });
+                
+            } catch (error) {
+                responseDiv.textContent = 'Error: ' + error.message;
+            }
+        }
+    </script>
+</body>
+</html>
