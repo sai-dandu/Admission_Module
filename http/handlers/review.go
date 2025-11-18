@@ -59,10 +59,13 @@ func handleApplicationAcceptance(w http.ResponseWriter, appService *services.App
 
 	// Send acceptance email asynchronously
 	go func() {
+
+		services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
+
 		if err := services.SendAcceptanceEmail(result.StudentName, result.StudentEmail, result.CourseName, result.CourseFee); err != nil {
 			log.Printf("Warning: failed to send acceptance email: %v", err)
 		}
-		services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
+		//services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
 	}()
 
 	// Return success response with payment details

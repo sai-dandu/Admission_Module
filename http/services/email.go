@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"gopkg.in/gomail.v2"
 )
@@ -65,7 +66,7 @@ func SendEmail(to, subject, body string, attachment ...string) error {
 	return nil
 }
 
-// SendAcceptanceEmail sends congratulations email with course details
+// SendAcceptanceEmail sends congratulations email with course details and publishes to Kafka
 func SendAcceptanceEmail(studentName, studentEmail, courseName string, courseFee float64) error {
 	emailBody := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -98,10 +99,14 @@ func SendAcceptanceEmail(studentName, studentEmail, courseName string, courseFee
 	`, studentName, courseName, courseFee)
 
 	subject := fmt.Sprintf("Congratulations %s - Your Application is Accepted!", studentName)
-	return SendEmail(studentEmail, subject, emailBody)
+	return SendEmailWithKafkaEvent(studentEmail, subject, emailBody, "acceptance", map[string]interface{}{
+		"student_name": studentName,
+		"course_name":  courseName,
+		"course_fee":   courseFee,
+	})
 }
 
-// SendRejectionEmail sends rejection notification email
+// SendRejectionEmail sends rejection notification email and publishes to Kafka
 func SendRejectionEmail(studentName, studentEmail string) error {
 	emailBody := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -129,5 +134,36 @@ func SendRejectionEmail(studentName, studentEmail string) error {
 	`, studentName)
 
 	subject := "Application Status - Rejection"
-	return SendEmail(studentEmail, subject, emailBody)
+	return SendEmailWithKafkaEvent(studentEmail, subject, emailBody, "rejection", map[string]interface{}{
+		"student_name": studentName,
+	})
+}
+
+// PublishEmailSentEvent publishes email sent event to Kafka
+func PublishEmailSentEvent(emailType, recipient, subject string, metadata map[string]interface{}) {
+	go func() {
+		evt := map[string]interface{}{
+			"event":     "email." + emailType,
+			"recipient": recipient,
+			"subject":   subject,
+			"metadata":  metadata,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := Publish("emails", fmt.Sprintf("email-%s", recipient), evt); err != nil {
+			log.Printf("Warning: failed to publish email.%s event: %v", emailType, err)
+		}
+	}()
+}
+
+// SendEmailWithKafkaEvent sends email and publishes event to Kafka
+func SendEmailWithKafkaEvent(to, subject, body string, emailType string, metadata map[string]interface{}) error {
+	// Send email
+	if err := SendEmail(to, subject, body); err != nil {
+		return err
+	}
+
+	// Publish email.sent event to Kafka (async, best-effort)
+	PublishEmailSentEvent(emailType, to, subject, metadata)
+
+	return nil
 }
