@@ -227,8 +227,6 @@ func insertDefaultData() error {
 		for _, query := range counselorQueries {
 			if _, err := DB.Exec(query); err != nil {
 				log.Printf("[DB] Warning: Error inserting counselor: %v", err)
-			} else {
-				log.Println("[DB] ✓ Default counselor inserted")
 			}
 		}
 	}
@@ -258,8 +256,6 @@ func insertDefaultData() error {
 		for _, query := range courseQueries {
 			if _, err := DB.Exec(query); err != nil {
 				log.Printf("[DB] Warning: Error inserting course: %v", err)
-			} else {
-				log.Println("[DB] ✓ Default course inserted")
 			}
 		}
 	}

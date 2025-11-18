@@ -2,6 +2,7 @@ package services
 
 import (
 	"admission-module/models"
+	"fmt"
 	"strconv"
 
 	"github.com/xuri/excelize/v2"
@@ -16,7 +17,14 @@ func ParseExcel(filePath string) ([]models.Lead, error) {
 	}
 	defer f.Close()
 
-	rows, err := f.GetRows("Sheet1")
+	// Get first available sheet
+	sheetList := f.GetSheetList()
+	if len(sheetList) == 0 {
+		return nil, fmt.Errorf("no sheets found in Excel file")
+	}
+	sheetName := sheetList[0]
+
+	rows, err := f.GetRows(sheetName)
 	if err != nil {
 		return nil, err
 	}

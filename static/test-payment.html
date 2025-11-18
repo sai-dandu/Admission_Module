@@ -62,7 +62,7 @@
         <input type="number" id="courseId" placeholder="Enter course ID">
     </div>
     
-    <div class="input-group">
+    <div class="input-group" id="amountGroup">
         <label for="amount">Amount (INR):</label>
         <input type="number" id="amount" value="1870">
     </div>
@@ -75,20 +75,23 @@
         function updateAmount() {
             const paymentType = document.getElementById('paymentType').value;
             const amountInput = document.getElementById('amount');
+            const amountGroup = document.getElementById('amountGroup');
             const courseIdGroup = document.getElementById('courseIdGroup');
             const courseIdInput = document.getElementById('courseId');
             
             if (paymentType === 'REGISTRATION') {
+                // Registration: Show amount field, fixed at 1870
                 amountInput.value = 1870;
                 amountInput.disabled = true;
+                amountGroup.style.display = 'block';
                 courseIdGroup.style.display = 'none';
                 courseIdInput.value = '';
             } else {
-                amountInput.disabled = false;
+                // Course Fee: Hide amount field, show course ID
                 amountInput.value = '';
+                amountGroup.style.display = 'none';
                 courseIdGroup.style.display = 'block';
                 courseIdInput.focus();
-                amountInput.placeholder = 'Amount will be fetched from course';
             }
         }
         
@@ -111,6 +114,12 @@
                         responseDiv.textContent = 'Error: Course ID is required for Course Fee payment';
                         return;
                     }
+                } else if (paymentType === 'REGISTRATION') {
+                    // Registration: amount is required (user entered or default 1870)
+                    if (!amount || amount <= 0) {
+                        responseDiv.textContent = 'Error: Amount is required and must be positive';
+                        return;
+                    }
                 }
 
                 // Build request body
@@ -119,7 +128,7 @@
                     payment_type: paymentType
                 };
 
-                // For registration, include amount
+                // For registration, include amount (user entered or 1870)
                 if (paymentType === 'REGISTRATION') {
                     requestBody.amount = parseFloat(amount) || 1870;
                 } else if (paymentType === 'COURSE_FEE') {
@@ -128,8 +137,9 @@
                 }
 
                 console.log('Sending payment request:', requestBody);
+                responseDiv.textContent = 'Creating payment order...';
 
-                // First, call your backend to create the order
+                // Call backend to create the order
                 const response = await fetch('http://localhost:8080/initiate-payment', {
                     method: 'POST',
                     headers: {
@@ -150,65 +160,71 @@
                     return;
                 }
                 
-                responseDiv.textContent = 'Order created: ' + JSON.stringify(orderData, null, 2) + '\n\nPayment Type: ' + paymentType;
+                responseDiv.textContent = 'Order created successfully!\n\nOrder Details:\n' + JSON.stringify(orderData, null, 2) + '\n\nRedirecting to Razorpay...';
                 console.log('Order ID:', orderData.order_id, 'Amount:', orderData.amount);
 
-                // Then open Razorpay payment form
-                const options = {
-                    key: 'rzp_test_RcoABp810ZglpG', // Your Razorpay Key ID
-                    amount: orderData.amount * 100, // Amount in paise
-                    currency: orderData.currency || 'INR',
-                    name: "Sai Admissions",
-                    description: paymentType === 'REGISTRATION' ? "Registration Fee Payment" : "Course Fee Payment",
-                    order_id: orderData.order_id,
-                    handler: async function (response) {
-                        console.log('Payment successful, verifying:', {
-                            order_id: response.razorpay_order_id,
-                            payment_id: response.razorpay_payment_id,
-                            signature: response.razorpay_signature
-                        });
-                        
-                        // Verify payment after successful payment
-                        responseDiv.textContent = 'Processing payment verification...\n\nRazorpay Response:\n' + JSON.stringify(response, null, 2);
-                        
-                        const verifyResponse = await fetch('http://localhost:8080/verify-payment', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                order_id: response.razorpay_order_id,
-                                payment_id: response.razorpay_payment_id,
-                                razorpay_signature: response.razorpay_signature
-                            })
-                        });
-                        
-                        const verifyData = await verifyResponse.json();
-                        console.log('Verify response:', verifyData);
-                        responseDiv.textContent = 'Payment verified: ' + JSON.stringify(verifyData, null, 2);
-                    },
-                    prefill: {
-                        name: "Test Student",
-                        email: "student@example.com",
-                        contact: "9999999999"
-                    },
-                    theme: {
-                        color: "#3399cc"
-                    }
-                };
+                // Delay before opening Razorpay (show order details)
+                setTimeout(() => {
+                    openRazorpayCheckout(orderData, paymentType, responseDiv);
+                }, 1500);
 
-                const rzp = new Razorpay(options);
-                rzp.open();
-                
-                rzp.on('payment.failed', function (response){
-                    console.error('Payment failed:', response.error);
-                    responseDiv.textContent = 'Payment failed: ' + JSON.stringify(response.error, null, 2);
-                });
-                
             } catch (error) {
                 console.error('Error:', error);
                 responseDiv.textContent = 'Error: ' + error.message + '\n\nStack:\n' + error.stack;
             }
+        }
+
+        function openRazorpayCheckout(orderData, paymentType, responseDiv) {
+            const options = {
+                key: 'rzp_test_RcoABp810ZglpG', // Your Razorpay Key ID
+                amount: orderData.amount * 100, // Amount in paise
+                currency: orderData.currency || 'INR',
+                name: "Sai Admissions",
+                description: paymentType === 'REGISTRATION' ? "Registration Fee Payment" : "Course Fee Payment",
+                order_id: orderData.order_id,
+                handler: async function (response) {
+                    console.log('Payment successful, verifying:', {
+                        order_id: response.razorpay_order_id,
+                        payment_id: response.razorpay_payment_id,
+                        signature: response.razorpay_signature
+                    });
+                    
+                    // Verify payment after successful payment
+                    responseDiv.textContent = 'Processing payment verification...\n\nRazorpay Response:\n' + JSON.stringify(response, null, 2);
+                    
+                    const verifyResponse = await fetch('http://localhost:8080/verify-payment', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            order_id: response.razorpay_order_id,
+                            payment_id: response.razorpay_payment_id,
+                            razorpay_signature: response.razorpay_signature
+                        })
+                    });
+                    
+                    const verifyData = await verifyResponse.json();
+                    console.log('Verify response:', verifyData);
+                    responseDiv.textContent = '✅ Payment Verified Successfully!\n\nVerification Response:\n' + JSON.stringify(verifyData, null, 2);
+                },
+                prefill: {
+                    name: "Test Student",
+                    email: "student@example.com",
+                    contact: "9999999999"
+                },
+                theme: {
+                    color: "#3399cc"
+                }
+            };
+
+            const rzp = new Razorpay(options);
+            rzp.open();
+            
+            rzp.on('payment.failed', function (response){
+                console.error('Payment failed:', response.error);
+                responseDiv.textContent = '❌ Payment failed: ' + JSON.stringify(response.error, null, 2);
+            });
         }
     </script>
 </body>

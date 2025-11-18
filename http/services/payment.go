@@ -354,8 +354,7 @@ func (s *PaymentService) VerifyPayment(req VerifyPaymentRequest) (*VerifyPayment
 		log.Printf("[PAYMENT] Student_lead updated - Rows affected: %d, Meet scheduled automatically", rows)
 	}
 
-	// Commit transaction
-	log.Printf("[PAYMENT] Committing transaction...")
+
 	if err = tx.Commit(); err != nil {
 		log.Printf("[PAYMENT] Error committing transaction: %v", err)
 		return nil, fmt.Errorf("error committing transaction")

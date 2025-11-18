@@ -59,7 +59,7 @@ func handleApplicationAcceptance(w http.ResponseWriter, appService *services.App
 
 	// Send acceptance email asynchronously
 	go func() {
-		if err := appService.SendAcceptanceEmail(result.StudentName, result.StudentEmail, result.CourseName, result.CourseFee); err != nil {
+		if err := services.SendAcceptanceEmail(result.StudentName, result.StudentEmail, result.CourseName, result.CourseFee); err != nil {
 			log.Printf("Warning: failed to send acceptance email: %v", err)
 		}
 		services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
@@ -96,7 +96,7 @@ func handleApplicationRejection(w http.ResponseWriter, appService *services.Appl
 
 	// Send rejection email asynchronously
 	go func() {
-		if err := appService.SendRejectionEmail(result.StudentName, result.StudentEmail); err != nil {
+		if err := services.SendRejectionEmail(result.StudentName, result.StudentEmail); err != nil {
 			log.Printf("Warning: failed to send rejection email: %v", err)
 		}
 		services.PublishApplicationEvent("rejected", studentID, result.StudentEmail, "", "rejected")
