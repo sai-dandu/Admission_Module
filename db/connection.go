@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -168,6 +169,11 @@ func createTables() error {
 		log.Printf("Warning: Error applying migrations: %v", err)
 	}
 
+	// Insert default dummy data if empty
+	if err := insertDefaultData(); err != nil {
+		log.Printf("Warning: Error inserting default data: %v", err)
+	}
+
 	return nil
 }
 
@@ -192,6 +198,70 @@ func applyMigrations() error {
 
 	for _, query := range indexQueries {
 		DB.Exec(query)
+	}
+
+	return nil
+}
+
+func insertDefaultData() error {
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	// Check if counselors exist
+	var counselorCount int
+	err := DB.QueryRow("SELECT COUNT(*) FROM counselor").Scan(&counselorCount)
+	if err != nil {
+		return fmt.Errorf("error checking counselor count: %w", err)
+	}
+
+	if counselorCount == 0 {
+		log.Println("[DB] No counselors found, inserting default counselors...")
+		counselorQueries := []string{
+			fmt.Sprintf(`INSERT INTO counselor (name, email, phone, assigned_count, max_capacity, is_referral_enabled, created_at, updated_at) 
+				VALUES ('Dr. Rishi Kumar', 'rishi@university.edu', '+919876543210', 0, 15, true, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO counselor (name, email, phone, assigned_count, max_capacity, is_referral_enabled, created_at, updated_at) 
+				VALUES ('Prof. Priya Sharma', 'priya@university.edu', '+919876543211', 0, 15, false, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO counselor (name, email, phone, assigned_count, max_capacity, is_referral_enabled, created_at, updated_at) 
+				VALUES ('Ms. Anjali Verma', 'anjali@university.edu', '+919876543212', 0, 12, true, '%s', '%s')`, now, now),
+		}
+
+		for _, query := range counselorQueries {
+			if _, err := DB.Exec(query); err != nil {
+				log.Printf("[DB] Warning: Error inserting counselor: %v", err)
+			} else {
+				log.Println("[DB] ✓ Default counselor inserted")
+			}
+		}
+	}
+
+	// Check if courses exist
+	var courseCount int
+	err = DB.QueryRow("SELECT COUNT(*) FROM course").Scan(&courseCount)
+	if err != nil {
+		return fmt.Errorf("error checking course count: %w", err)
+	}
+
+	if courseCount == 0 {
+		log.Println("[DB] No courses found, inserting default courses...")
+		courseQueries := []string{
+			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
+				VALUES ('B.Tech Computer Science', 'Bachelor of Technology in Computer Science - 4 year program covering programming, databases, and software development', 125000.00, '4 Years', 1, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
+				VALUES ('M.Tech Information Technology', 'Master of Technology in IT - 2 year advanced program with specializations in AI, Cloud Computing', 75000.00, '2 Years', 1, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
+				VALUES ('MBA Business Administration', 'Master of Business Administration - 2 year program focusing on management, finance, and entrepreneurship', 200000.00, '2 Years', 1, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
+				VALUES ('B.S Electronics Engineering', 'Bachelor of Science in Electronics Engineering - 4 year program with focus on circuit design and embedded systems', 110000.00, '4 Years', 1, '%s', '%s')`, now, now),
+			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
+				VALUES ('Diploma Data Science', 'Diploma in Data Science - 1 year intensive program covering analytics, machine learning, and big data', 50000.00, '1 Year', 1, '%s', '%s')`, now, now),
+		}
+
+		for _, query := range courseQueries {
+			if _, err := DB.Exec(query); err != nil {
+				log.Printf("[DB] Warning: Error inserting course: %v", err)
+			} else {
+				log.Println("[DB] ✓ Default course inserted")
+			}
+		}
 	}
 
 	return nil
