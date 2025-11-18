@@ -34,13 +34,22 @@ func SetupRoutes() {
 		})(w, r)
 	})
 
-	// API Routes
+	// Lead Management APIs
 	http.HandleFunc("/upload-leads", middleware.EnableCORS(handlers.UploadLeads))
 	http.HandleFunc("/leads", middleware.EnableCORS(handlers.GetLeads))
 	http.HandleFunc("/create-lead", middleware.EnableCORS(handlers.CreateLead))
-	// http.HandleFunc("/assign-counsellor", middleware.EnableCORS(handlers.AssignCounsellor))
-	http.HandleFunc("/schedule-meet", middleware.EnableCORS(handlers.ScheduleMeet))
+
+	// Course Management APIs
+	http.HandleFunc("/courses", middleware.EnableCORS(handlers.GetCourses))
+	http.HandleFunc("/course", middleware.EnableCORS(handlers.GetCourseByID))
+	http.HandleFunc("/create-course", middleware.EnableCORS(handlers.CreateCourse))
+	http.HandleFunc("/update-course", middleware.EnableCORS(handlers.UpdateCourse))
+
+	// Payment APIs
 	http.HandleFunc("/initiate-payment", middleware.EnableCORS(handlers.InitiatePayment))
 	http.HandleFunc("/verify-payment", middleware.EnableCORS(handlers.VerifyPayment))
+
+	// Interview & Application APIs
+	http.HandleFunc("/schedule-meet", middleware.EnableCORS(handlers.ScheduleMeet))
 	http.HandleFunc("/application-action", middleware.EnableCORS(handlers.ApplicationAction))
 }

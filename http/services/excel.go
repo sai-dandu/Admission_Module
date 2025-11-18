@@ -35,7 +35,6 @@ func ParseExcel(filePath string) ([]models.Lead, error) {
 			Phone:             row[3],
 			Education:         row[4],
 			LeadSource:        row[5],
-			PaymentStatus:     row[7],
 			MeetLink:          row[8],
 			ApplicationStatus: row[9],
 		}

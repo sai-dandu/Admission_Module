@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"admission-module/db"
+	resp "admission-module/http/response"
 	"admission-module/http/services"
 	"admission-module/models"
 	"admission-module/utils"
@@ -134,9 +135,9 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 		return fmt.Errorf("lead already exists with this email or phone")
 	}
 
-	// Assign counsellor with row lock
-	if err := s.assignCounsellorTx(ctx, tx, lead); err != nil {
-		return fmt.Errorf("error assigning counsellor: %w", err)
+	// Assign counselor with row lock
+	if err := s.assignCounselorTx(ctx, tx, lead); err != nil {
+		return fmt.Errorf("error assigning counselor: %w", err)
 	}
 
 	// Insert lead
@@ -146,10 +147,10 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 	}
 	lead.ID = int(leadID)
 
-	// Update counsellor count atomically
+	// Update counselor count atomically
 	if lead.CounsellorID != nil {
-		if err := s.updateCounsellorCountTx(ctx, tx, *lead.CounsellorID); err != nil {
-			return fmt.Errorf("error updating counsellor count: %w", err)
+		if err := s.updateCounselorCountTx(ctx, tx, *lead.CounsellorID); err != nil {
+			return fmt.Errorf("error updating counselor count: %w", err)
 		}
 	}
 
@@ -158,8 +159,14 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	log.Printf("Lead created successfully: ID=%d, Email=%s, Counsellor=%v",
+	log.Printf("Lead created successfully: ID=%d, Email=%s, Counselor=%v",
 		leadID, lead.Email, lead.CounsellorID)
+
+	// Send welcome email with counselor information
+	if err := services.SendWelcomeEmailWithCounselorInfo(ctx, lead); err != nil {
+		log.Printf("Warning: failed to send welcome email: %v", err)
+		// Don't return error
+	}
 
 	return nil
 }
@@ -180,13 +187,14 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build query with filters
+	// Build query with filters - Updated to use student_lead table
 	query := `
 		SELECT 
 			id, name, email, phone, education, lead_source, 
-			counsellor_id, payment_status, meet_link, 
-			application_status, created_at, updated_at 
-		FROM leads 
+			counselor_id, registration_fee_status, course_fee_status, meet_link, 
+			application_status, registration_payment_id, selected_course_id, 
+			course_payment_id, interview_scheduled_at, created_at, updated_at 
+		FROM student_lead 
 		WHERE 1=1`
 
 	args := []interface{}{}
@@ -278,14 +286,14 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get counsellor name for response
-	counsellorName := s.getCounsellorName(ctx, lead.CounsellorID)
+	// Get counselor name for response
+	counselorName := s.getCounselorName(ctx, lead.CounsellorID)
 
 	response := CreateLeadResponse{
-		Message:        "Lead created successfully",
-		StudentID:      int64(lead.ID),
-		CounsellorName: counsellorName,
-		Email:          lead.Email,
+		Message:       "Lead created successfully",
+		StudentID:     int64(lead.ID),
+		CounselorName: counselorName,
+		Email:         lead.Email,
 	}
 
 	respondJSON(w, http.StatusCreated, response)
@@ -293,62 +301,62 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 
 // Transaction-safe helper methods
 
-func (s *LeadService) assignCounsellorTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) error {
+func (s *LeadService) assignCounselorTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) error {
 	if lead.CounsellorID != nil {
 		return nil // Already assigned
 	}
 
-	counsellorID, err := s.getAvailableCounsellorIDTx(ctx, tx, lead.LeadSource)
+	counselorID, err := s.getAvailableCounselorIDTx(ctx, tx, lead.LeadSource)
 	if err != nil {
 		return err
 	}
 
-	lead.CounsellorID = counsellorID
+	lead.CounsellorID = counselorID
 
-	if counsellorID == nil {
-		log.Printf("Warning: No available counsellor for lead source: %s", lead.LeadSource)
+	if counselorID == nil {
+		log.Printf("Warning: No available counselor for lead source: %s", lead.LeadSource)
 	}
 
 	return nil
 }
 
-func (s *LeadService) getAvailableCounsellorIDTx(ctx context.Context, tx *sql.Tx, leadSource string) (*int64, error) {
+func (s *LeadService) getAvailableCounselorIDTx(ctx context.Context, tx *sql.Tx, leadSource string) (*int64, error) {
 	var query string
 
 	switch leadSource {
 	case utils.SourceWebsite:
-		query = `SELECT id FROM counsellors 
+		query = `SELECT id FROM counselor 
 				 WHERE assigned_count < max_capacity 
 				 ORDER BY assigned_count ASC, id ASC 
 				 LIMIT 1 FOR UPDATE SKIP LOCKED`
 	case utils.SourceReferral:
-		query = `SELECT id FROM counsellors 
+		query = `SELECT id FROM counselor 
 				 WHERE is_referral_enabled = true 
 				 AND assigned_count < max_capacity 
 				 ORDER BY assigned_count ASC, id ASC 
 				 LIMIT 1 FOR UPDATE SKIP LOCKED`
 	default:
-		query = `SELECT id FROM counsellors 
+		query = `SELECT id FROM counselor 
 				 WHERE assigned_count < max_capacity 
 				 ORDER BY assigned_count ASC, id ASC 
 				 LIMIT 1 FOR UPDATE SKIP LOCKED`
 	}
 
-	var counsellorID int64
-	err := tx.QueryRowContext(ctx, query).Scan(&counsellorID)
+	var counselorID int64
+	err := tx.QueryRowContext(ctx, query).Scan(&counselorID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil // No available counsellor
+			return nil, nil // No available counselor
 		}
 		return nil, err
 	}
 
-	return &counsellorID, nil
+	return &counselorID, nil
 }
 
 func (s *LeadService) leadExistsTx(ctx context.Context, tx *sql.Tx, email, phone string) (bool, error) {
 	var count int
-	query := "SELECT COUNT(*) FROM leads WHERE email = $1 OR phone = $2"
+	query := "SELECT COUNT(*) FROM student_lead WHERE email = $1 OR phone = $2"
 	err := tx.QueryRowContext(ctx, query, email, phone).Scan(&count)
 	if err != nil {
 		return false, err
@@ -360,11 +368,11 @@ func (s *LeadService) insertLeadTx(ctx context.Context, tx *sql.Tx, lead *models
 	now := time.Now()
 
 	query := `
-		INSERT INTO leads (
+		INSERT INTO student_lead (
 			name, email, phone, education, lead_source, 
-			counsellor_id, payment_status, meet_link, 
+			counselor_id, registration_fee_status, course_fee_status, meet_link, 
 			application_status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id`
 
 	var leadID int64
@@ -377,7 +385,8 @@ func (s *LeadService) insertLeadTx(ctx context.Context, tx *sql.Tx, lead *models
 		lead.Education,
 		lead.LeadSource,
 		lead.CounsellorID,
-		lead.PaymentStatus,
+		"PENDING",
+		"PENDING",
 		lead.MeetLink,
 		lead.ApplicationStatus,
 		now,
@@ -391,9 +400,9 @@ func (s *LeadService) insertLeadTx(ctx context.Context, tx *sql.Tx, lead *models
 	return leadID, nil
 }
 
-func (s *LeadService) updateCounsellorCountTx(ctx context.Context, tx *sql.Tx, counsellorID int64) error {
-	query := "UPDATE counsellors SET assigned_count = assigned_count + 1 WHERE id = $1"
-	result, err := tx.ExecContext(ctx, query, counsellorID)
+func (s *LeadService) updateCounselorCountTx(ctx context.Context, tx *sql.Tx, counselorID int64) error {
+	query := "UPDATE counselor SET assigned_count = assigned_count + 1 WHERE id = $1"
+	result, err := tx.ExecContext(ctx, query, counselorID)
 	if err != nil {
 		return err
 	}
@@ -404,22 +413,22 @@ func (s *LeadService) updateCounsellorCountTx(ctx context.Context, tx *sql.Tx, c
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("counsellor not found: %d", counsellorID)
+		return fmt.Errorf("counselor not found: %d", counselorID)
 	}
 
 	return nil
 }
 
-func (s *LeadService) getCounsellorName(ctx context.Context, counsellorID *int64) string {
-	if counsellorID == nil {
+func (s *LeadService) getCounselorName(ctx context.Context, counselorID *int64) string {
+	if counselorID == nil {
 		return "Not Assigned"
 	}
 
 	var name string
-	query := "SELECT name FROM counsellors WHERE id = $1"
-	err := s.db.QueryRowContext(ctx, query, *counsellorID).Scan(&name)
+	query := "SELECT name FROM counselor WHERE id = $1"
+	err := s.db.QueryRowContext(ctx, query, *counselorID).Scan(&name)
 	if err != nil {
-		log.Printf("Error fetching counsellor name for ID %d: %v", *counsellorID, err)
+		log.Printf("Error fetching counselor name for ID %d: %v", *counselorID, err)
 		return "Unknown"
 	}
 	return name
@@ -444,9 +453,9 @@ func validateLead(lead *models.Lead) error {
 		return err
 	}
 
-	if err := utils.ValidateLeadSource(lead.LeadSource); err != nil {
-		return err
-	}
+	// if err := utils.ValidateLeadSource(lead.LeadSource); err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
@@ -463,25 +472,21 @@ type GetLeadsResponse struct {
 }
 
 type CreateLeadResponse struct {
-	Message        string `json:"message"`
-	StudentID      int64  `json:"student_id"`
-	CounsellorName string `json:"counsellor_name"`
-	Email          string `json:"email"`
+	Message       string `json:"message"`
+	StudentID     int64  `json:"student_id"`
+	CounselorName string `json:"counselor_name"`
+	Email         string `json:"email"`
 }
 
-// Response helper wrappers (for backward compatibility)
+// Helper functions (wrappers around response package for backwards compatibility)
+// These maintain the existing call pattern while delegating to the centralized response package
+
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Error encoding JSON response: %v", err)
-	}
+	resp.SendJSON(w, status, data)
 }
 
 func respondError(w http.ResponseWriter, message string, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	resp.ErrorResponse(w, status, message)
 }
 
 // Public handler wrappers (for backward compatibility with existing routes)

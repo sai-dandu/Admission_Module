@@ -64,19 +64,19 @@ func ValidateEducation(education string) error {
 	return nil
 }
 
-// ValidateLeadSource checks if lead source is valid
-func ValidateLeadSource(leadSource string) error {
-	validSources := map[string]bool{
-		SourceWebsite:  true,
-		SourceReferral: true,
-		SourceCampaign: true,
-		GoogleAds:      true,
-		FacebookAds:    true,
+// // ValidateLeadSource checks if lead source is valid
+// func ValidateLeadSource(leadSource string) error {
+// 	validSources := map[string]bool{
+// 		SourceWebsite:  true,
+// 		SourceReferral: true,
+// 		SourceCampaign: true,
+// 		GoogleAds:      true,
+// 		FacebookAds:    true,
 
-		"": true,
-	}
-	if !validSources[leadSource] {
-		return fmt.Errorf("invalid lead source: %s", leadSource)
-	}
-	return nil
-}
+// 		"": true,
+// 	}
+// 	if !validSources[leadSource] {
+// 		return fmt.Errorf("invalid lead source: %s", leadSource)
+// 	}
+// 	return nil
+// }

@@ -22,7 +22,7 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 
 	// Get student email
 	var email string
-	err := db.DB.QueryRow("SELECT email FROM leads WHERE id = $1", req.StudentID).Scan(&email)
+	err := db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", req.StudentID).Scan(&email)
 	if err != nil {
 		http.Error(w, "Student not found", http.StatusNotFound)
 		return
@@ -38,7 +38,7 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update DB
-	_, err = db.DB.Exec("UPDATE leads SET meet_link = $1, application_status = 'MEETING_SCHEDULED' WHERE id = $2", meetLink, req.StudentID)
+	_, err = db.DB.Exec("UPDATE student_lead SET meet_link = $1, application_status = 'MEETING_SCHEDULED' WHERE id = $2", meetLink, req.StudentID)
 	if err != nil {
 		http.Error(w, "Error updating lead", http.StatusInternalServerError)
 		return

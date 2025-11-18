@@ -2,130 +2,85 @@ package handlers
 
 import (
 	"admission-module/db"
+	resp "admission-module/http/response"
 	"admission-module/http/services"
-	"admission-module/models"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"os"
 	"time"
-
-	"github.com/razorpay/razorpay-go"
 )
 
-func InitiatePayment(w http.ResponseWriter, r *http.Request) {
+// InitiatePaymentHandler handles payment initiation requests
+func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
 	var req struct {
-		StudentID int     `json:"student_id"`
-		Amount    float64 `json:"amount"`
+		StudentID   int     `json:"student_id"`
+		Amount      float64 `json:"amount"`
+		PaymentType string  `json:"payment_type"`
+		CourseID    *int    `json:"course_id,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format")
 		return
 	}
 
-	// Basic validation
-	if req.Amount <= 0 {
-		http.Error(w, "Invalid amount", http.StatusBadRequest)
-		return
+	// Default to registration payment if not specified
+	if req.PaymentType == "" {
+		req.PaymentType = services.PaymentTypeRegistration
 	}
 
-	// Ensure the student/lead exists before creating an order
-	var exists bool
-	err := db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM leads WHERE id = $1)", req.StudentID).Scan(&exists)
+	paymentService := services.NewPaymentService()
+
+	// Validate and prepare payment
+	preparedReq, err := paymentService.ValidateAndPreparePayment(services.InitiatePaymentRequest{
+		StudentID:   req.StudentID,
+		Amount:      req.Amount,
+		PaymentType: req.PaymentType,
+		CourseID:    req.CourseID,
+	})
 	if err != nil {
-		http.Error(w, "Error checking student", http.StatusInternalServerError)
+		log.Printf("Payment validation error: %v", err)
+		resp.ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if !exists {
-		http.Error(w, "Student not found", http.StatusBadRequest)
-		return
-	}
-
-	// Get Razorpay credentials from environment variables
-	keyID := os.Getenv("RazorpayKeyID")
-	keySecret := os.Getenv("RazorpayKeySecret")
-
-	if keyID == "" || keySecret == "" {
-		http.Error(w, "Razorpay credentials not configured", http.StatusInternalServerError)
-		return
-	}
-
-	client := razorpay.NewClient(keyID, keySecret)
-
-	data := map[string]interface{}{
-		"amount":   int(req.Amount * 100), // Convert to paise
-		"currency": "INR",
-		"receipt":  fmt.Sprintf("rcpt_%d", req.StudentID),
 	}
 
 	// Create Razorpay order
-	resp, err := client.Order.Create(data, nil)
+	orderResp, err := paymentService.CreateRazorpayOrder(*preparedReq)
 	if err != nil {
-		http.Error(w, "Error creating order", http.StatusInternalServerError)
+		log.Printf("Razorpay order creation error: %v", err)
+		resp.ErrorResponse(w, http.StatusInternalServerError, "Error creating payment order")
 		return
 	}
 
-	orderID := resp["id"].(string)
-
-	// Start a transaction
-	tx, err := db.DB.Begin()
-	if err != nil {
-		http.Error(w, "Error starting transaction", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback() // Rollback if we don't commit
-
-	// Save initial payment record
-	_, err = tx.Exec("INSERT INTO payments (student_id, amount, status, order_id) VALUES ($1, $2, $3, $4)",
-		req.StudentID, req.Amount, "PENDING", orderID)
-	if err != nil {
-		http.Error(w, "Error saving payment", http.StatusInternalServerError)
+	// Save payment record
+	if err := paymentService.SavePaymentRecord(req.StudentID, orderResp.OrderID, *preparedReq); err != nil {
+		log.Printf("[PAYMENT] Payment record save error - StudentID: %d, OrderID: %s, Error: %v", req.StudentID, orderResp.OrderID, err)
+		resp.ErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Error saving payment record: %v", err))
 		return
 	}
 
-	// Update lead payment status to PENDING
-	_, err = tx.Exec("UPDATE leads SET payment_status = 'PENDING' WHERE id = $1", req.StudentID)
-	if err != nil {
-		http.Error(w, "Error updating lead status", http.StatusInternalServerError)
-		return
-	}
+	// Publish event asynchronously
+	paymentService.PublishPaymentInitiatedEvent(req.StudentID, orderResp.OrderID, *preparedReq)
 
-	// Commit the transaction
-	if err = tx.Commit(); err != nil {
-		http.Error(w, "Error committing transaction", http.StatusInternalServerError)
-		return
-	}
+	log.Printf("[PAYMENT] Sending response to client - OrderID: '%s', Amount: %.2f, Currency: %s",
+		orderResp.OrderID, orderResp.Amount, orderResp.Currency)
 
-	// Publish payment initiated event (best-effort)
-	go func() {
-		evt := map[string]interface{}{
-			"event":      "payment.initiated",
-			"student_id": req.StudentID,
-			"order_id":   orderID,
-			"amount":     req.Amount,
-			"currency":   "INR",
-			"status":     "PENDING",
-			"ts":         time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := services.Publish("payments", fmt.Sprintf("student-%d", req.StudentID), evt); err != nil {
-			fmt.Printf("Warning: failed to publish payment.initiated event: %v\n", err)
-		}
-	}()
-
-	// Return order details to client
-	response := models.RazorpayOrder{
-		OrderID:  orderID,
-		Amount:   req.Amount,
-		Currency: "INR",
-		Receipt:  fmt.Sprintf("rcpt_%d", req.StudentID),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	resp.SuccessResponse(w, http.StatusOK, "Payment order created", orderResp)
 }
 
-func VerifyPayment(w http.ResponseWriter, r *http.Request) {
+// VerifyPaymentHandler handles payment verification requests
+func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
 	var req struct {
 		OrderID      string `json:"order_id"`
 		PaymentID    string `json:"payment_id"`
@@ -133,81 +88,106 @@ func VerifyPayment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		log.Printf("[PAYMENT] Request decode error: %v", err)
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format")
 		return
 	}
 
-	// Start a transaction
-	tx, err := db.DB.Begin()
+	// Validate required fields
+	log.Printf("[PAYMENT] Verify request received - OrderID: '%s', PaymentID: '%s', Signature: '%s'",
+		req.OrderID, req.PaymentID, req.RazorpaySign)
+
+	if req.OrderID == "" {
+		log.Printf("[PAYMENT] ERROR: OrderID is empty in verify request")
+		resp.ErrorResponse(w, http.StatusBadRequest, "order_id is required and cannot be empty")
+		return
+	}
+	if req.PaymentID == "" {
+		log.Printf("[PAYMENT] ERROR: PaymentID is empty in verify request")
+		resp.ErrorResponse(w, http.StatusBadRequest, "payment_id is required and cannot be empty")
+		return
+	}
+	if req.RazorpaySign == "" {
+		log.Printf("[PAYMENT] ERROR: RazorpaySign is empty in verify request")
+		resp.ErrorResponse(w, http.StatusBadRequest, "razorpay_signature is required and cannot be empty")
+		return
+	}
+
+	paymentService := services.NewPaymentService()
+
+	// Verify payment
+	result, err := paymentService.VerifyPayment(services.VerifyPaymentRequest{
+		OrderID:      req.OrderID,
+		PaymentID:    req.PaymentID,
+		RazorpaySign: req.RazorpaySign,
+	})
 	if err != nil {
-		http.Error(w, "Error starting transaction", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback()
-
-	// Get student ID from payment record first
-	var studentID int
-	err = tx.QueryRow("SELECT student_id FROM payments WHERE order_id = $1", req.OrderID).Scan(&studentID)
-	if err != nil {
-		http.Error(w, "Error retrieving payment details", http.StatusInternalServerError)
+		log.Printf("Payment verification error: %v", err)
+		resp.ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Update payment status
-	_, err = tx.Exec("UPDATE payments SET status = $1, payment_id = $2, razorpay_sign = $3 WHERE order_id = $4",
-		"PAID", req.PaymentID, req.RazorpaySign, req.OrderID)
-	if err != nil {
-		http.Error(w, "Error updating payment", http.StatusInternalServerError)
-		return
+	// Publish payment verified event
+	paymentService.PublishPaymentVerifiedEvent(result.StudentID, req.OrderID, req.PaymentID, result.PaymentType)
+
+	// If registration payment, schedule interview asynchronously
+	if paymentService.IsRegistrationPayment(result.PaymentType) {
+		go func() {
+			scheduleInterviewAfterPayment(result.StudentID, result.Email)
+		}()
 	}
 
-	// Update lead status
-	result, err := tx.Exec("UPDATE leads SET payment_status = 'PAID' WHERE id = $1", studentID)
-	if err != nil {
-		http.Error(w, "Error updating lead", http.StatusInternalServerError)
-		return
-	}
-
-	// Check if lead was actually updated
-	rows, err := result.RowsAffected()
-	if err != nil {
-		http.Error(w, "Error checking lead update", http.StatusInternalServerError)
-		return
-	}
-	if rows == 0 {
-		http.Error(w, "Lead not found", http.StatusNotFound)
-		return
-	}
-
-	// Commit the transaction
-	if err = tx.Commit(); err != nil {
-		fmt.Printf("Error committing transaction: %v\n", err)
-		http.Error(w, "Error committing transaction", http.StatusInternalServerError)
-		return
-	}
-
-	fmt.Printf("Payment verification successful - Student ID: %d, Order ID: %s\n", studentID, req.OrderID)
-
-	// Publish payment verified event (best-effort)
-	go func() {
-		evt := map[string]interface{}{
-			"event":      "payment.verified",
-			"student_id": studentID,
-			"order_id":   req.OrderID,
-			"payment_id": req.PaymentID,
-			"status":     "PAID",
-			"ts":         time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := services.Publish("payments", fmt.Sprintf("student-%d", studentID), evt); err != nil {
-			fmt.Printf("Warning: failed to publish payment.verified event: %v\n", err)
-		}
-	}()
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"message":    "Payment verified successfully",
+	// Return success response
+	resp.SuccessResponse(w, http.StatusOK, "Payment verified successfully", map[string]interface{}{
 		"status":     "PAID",
-		"student_id": fmt.Sprintf("%d", studentID),
+		"student_id": result.StudentID,
 		"order_id":   req.OrderID,
 	})
+}
+
+// scheduleInterviewAfterPayment schedules interview for the student after successful registration payment
+func scheduleInterviewAfterPayment(studentID int, email string) {
+	// Schedule meet
+	meetLink, err := services.ScheduleMeet(email)
+	if err != nil {
+		log.Printf("Error scheduling meet for student %d: %v", studentID, err)
+		return
+	}
+
+	// Get database instance and schedule interview
+	interviewTime := time.Now().Add(24 * time.Hour)
+
+	// Update DB with meet link and interview scheduled time
+	_, err = db.DB.Exec(
+		"UPDATE student_lead SET meet_link = $1, application_status = 'INTERVIEW_SCHEDULED', interview_scheduled_at = $2 WHERE id = $3",
+		meetLink, interviewTime, studentID)
+	if err != nil {
+		log.Printf("Error updating lead with meet link: %v", err)
+		return
+	}
+
+	log.Printf("Interview scheduled successfully for student %d at %s", studentID, interviewTime.Format(time.RFC3339))
+
+	// Publish interview scheduled event
+	evt := map[string]interface{}{
+		"event":                  "interview.scheduled",
+		"student_id":             studentID,
+		"email":                  email,
+		"meet_link":              meetLink,
+		"interview_scheduled_at": interviewTime.Format(time.RFC3339),
+		"status":                 "scheduled",
+		"ts":                     time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := services.Publish("meetings", fmt.Sprintf("student-%d", studentID), evt); err != nil {
+		log.Printf("Warning: failed to publish interview.scheduled event: %v", err)
+	}
+}
+
+// Backward compatibility wrappers
+func InitiatePayment(w http.ResponseWriter, r *http.Request) {
+	InitiatePaymentHandler(w, r)
+}
+
+func VerifyPayment(w http.ResponseWriter, r *http.Request) {
+	VerifyPaymentHandler(w, r)
 }

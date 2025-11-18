@@ -1,17 +1,21 @@
 # Admission Module API Documentation
 
 ## Overview
-The Admission Module is a Go-based REST API service for managing student admissions, including lead management, counselor assignments, meeting scheduling, payment processing via Razorpay, and event-driven architecture using Apache Kafka for real-time data streaming.
+The Admission Module is a Go-based REST API service for managing student admissions, including lead management, counselor assignments, meeting scheduling, separate payment processing for registration and course fees via Razorpay, and event-driven architecture using Apache Kafka.
 
 **Base URL:** `http://localhost:8080`  
-**Version:** 1.0.0  
-**Last Updated:** November 17, 2025
+**Version:** 2.0.0  
+**Last Updated:** November 18, 2025
+
+---
 
 ## Prerequisites
-- Go 1.21+
+- Go 1.24+
 - PostgreSQL 12+
-- Docker & Docker Compose (for Kafka)
+- Docker & Docker Compose (optional, for Kafka)
 - Windows PowerShell or Git Bash
+
+---
 
 ## Project Structure
 ```
@@ -21,22 +25,23 @@ admission-module/
 ├── config/
 │   └── config.go                # Configuration management
 ├── db/
-│   └── connection.go            # Database connection & initialization
+│   └── connection.go            # Database connection & schema initialization
 ├── http/
 │   ├── http.go                  # HTTP server setup & middleware
-│   ├── handlers/                # API handlers (service-oriented)
-│   │   ├── lead.go              # Lead management (LeadService)
-│   │   ├── payment.go           # Payment handling
+│   ├── handlers/                # API endpoint handlers
+│   │   ├── lead.go              # Lead management (create, list, bulk upload)
+│   │   ├── payment.go           # Payment initiation & verification
 │   │   ├── counsellor.go        # Counselor management
 │   │   ├── meet.go              # Meeting scheduling
-│   │   ├── email.go             # Email notifications
-│   │   └── review.go            # Reviews & feedback
+│   │   ├── review.go            # Reviews & feedback
 │   ├── middleware/
 │   │   └── cors.go              # CORS configuration
-│   └── services/                # Business logic services
+│   ├── response/                # Response utilities
+│   └── services/                # Business logic & integrations
+│       ├── payment.go           # Payment processing (Razorpay, registration/course fees)
+│       ├── notification.go      # Email notifications
 │       ├── kafka.go             # Event streaming
-│       ├── email.go             # Email service
-│       ├── excel.go             # Excel parsing
+│       ├── excel.go             # Excel file parsing
 │       ├── google_meet.go       # Google Meet integration
 │       └── offer_letter.go      # Offer letter generation
 ├── models/                      # Data models
@@ -47,23 +52,25 @@ admission-module/
 │   ├── common.go                # Common errors
 │   ├── errors.go                # Error types
 │   └── validation.go            # Validation errors
-├── utils/                       # Utilities
+├── utils/                       # Utility functions
 │   ├── constants.go             # Constants & enums
 │   ├── request.go               # Request utilities
-│   └── response.go              # Response utilities
+│   ├── response.go              # Response utilities
+│   ├── data_converter.go        # Data conversion & mapping
+│   ├── validation.go            # Input validation
+│   └── query_parser.go          # Query parameter parsing
 ├── logger/
 │   └── logger.go                # Logging configuration
-├── migrations/                  # Database migrations
-│   └── 001_improve_counsellor_assignment.sql
-├── static/
-│   └── test-payment.html        # Testing static files
-├── docker-compose.yml           # Kafka & services setup
-├── go.mod & go.sum              # Dependencies
-├── REFACTORING_NOTES.md         # Refactoring documentation
-└── IMPLEMENTATION_SUMMARY.md    # Implementation details
+├── docker-compose.yml           # Kafka & dependencies setup
+├── go.mod & go.sum              # Go dependencies
+└── README.md                    # Project overview
 ```
 
+---
+
 ## Configuration
+
+### Environment Variables
 Create a `.env` file in the project root:
 
 ```env
@@ -72,481 +79,765 @@ DB_HOST=localhost
 DB_PORT=5432
 DB_USER=postgres
 DB_PASSWORD=your_password
-DB_NAME=postgres
+DB_NAME=admission_db
 
-# Razorpay
+# Razorpay Payment Gateway
 RazorpayKeyID=rzp_test_xxxxx
-RazorpayKeySecret=xxxxx
+RazorpayKeySecret=your_secret_key
 
-# Kafka (Optional)
-KAFKA_BROKERS=host.docker.internal:9092
-KAFKA_TOPIC=admissions.payments
-
-# Email (Optional)
+# Email Service (SMTP)
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your_email@gmail.com
 SMTP_PASS=your_app_password
 EMAIL_FROM=noreply@admission-module.com
+
+# Kafka (Optional)
+KAFKA_BROKERS=localhost:9092
+KAFKA_TOPIC=admissions.payments
+
+# Server
+SERVER_PORT=8080
 ```
+
+---
+
+## Database Schema
+
+### Tables
+
+#### 1. `student_lead` - Main student record
+```sql
+CREATE TABLE student_lead (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    phone VARCHAR(20) NOT NULL UNIQUE,
+    education VARCHAR(255),
+    lead_source VARCHAR(100),
+    counselor_id INTEGER REFERENCES counselor(id) ON DELETE SET NULL,
+    registration_fee_status VARCHAR(50) DEFAULT 'PENDING',  -- PENDING, PAID
+    course_fee_status VARCHAR(50) DEFAULT 'PENDING',         -- PENDING, PAID
+    meet_link TEXT,
+    application_status VARCHAR(50) DEFAULT 'NEW',
+    registration_payment_id INTEGER,
+    selected_course_id INTEGER REFERENCES course(id) ON DELETE SET NULL,
+    course_payment_id INTEGER,
+    interview_scheduled_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### 2. `registration_payment` - Registration fee payments
+```sql
+CREATE TABLE registration_payment (
+    id SERIAL PRIMARY KEY,
+    student_id INTEGER NOT NULL UNIQUE REFERENCES student_lead(id) ON DELETE CASCADE,
+    amount NUMERIC(10, 2) NOT NULL,
+    status VARCHAR(50) DEFAULT 'PENDING',                    -- PENDING, PAID
+    order_id VARCHAR(255) UNIQUE,                            -- Razorpay order ID
+    payment_id VARCHAR(255),                                 -- Razorpay payment ID
+    razorpay_sign TEXT,                                      -- Payment signature
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### 3. `course_payment` - Course fee payments
+```sql
+CREATE TABLE course_payment (
+    id SERIAL PRIMARY KEY,
+    student_id INTEGER NOT NULL REFERENCES student_lead(id) ON DELETE CASCADE,
+    course_id INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+    amount NUMERIC(10, 2) NOT NULL,
+    status VARCHAR(50) DEFAULT 'PENDING',                    -- PENDING, PAID
+    order_id VARCHAR(255) UNIQUE,                            -- Razorpay order ID
+    payment_id VARCHAR(255),                                 -- Razorpay payment ID
+    razorpay_sign TEXT,                                      -- Payment signature
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_student_course UNIQUE(student_id, course_id)
+);
+```
+
+#### 4. `counselor` - Counselor profiles
+```sql
+CREATE TABLE counselor (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    phone VARCHAR(20),
+    assigned_count INTEGER DEFAULT 0,
+    max_capacity INTEGER DEFAULT 10,
+    is_referral_enabled BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### 5. `course` - Available courses
+```sql
+CREATE TABLE course (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    fee NUMERIC(10, 2) NOT NULL,
+    duration VARCHAR(100),
+    is_active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Performance Indexes
+```sql
+CREATE INDEX idx_student_lead_registration_fee_status ON student_lead(registration_fee_status);
+CREATE INDEX idx_student_lead_course_fee_status ON student_lead(course_fee_status);
+CREATE INDEX idx_student_lead_interview_scheduled ON student_lead(interview_scheduled_at);
+CREATE INDEX idx_registration_payment_student_id ON registration_payment(student_id);
+CREATE INDEX idx_registration_payment_order_id ON registration_payment(order_id);
+CREATE INDEX idx_course_payment_student_id ON course_payment(student_id);
+CREATE INDEX idx_course_payment_order_id ON course_payment(order_id);
+```
+
+---
 
 ## API Endpoints
 
 ### Authentication
-No authentication required. All endpoints are publicly accessible.
+⚠️ **No authentication required.** All endpoints are publicly accessible.
 
-### 1. Lead Management
+### Response Format
 
-#### Upload Leads (Batch)
-**POST** `/upload-leads`
-- **Content-Type:** `multipart/form-data`
-- **Body:** Excel file (.xlsx) containing lead data with columns: name, email, phone, education, lead_source
-- **Response (200 OK):**
-  ```json
-  {
-    "message": "Successfully uploaded 95 leads",
-    "success_count": 95,
-    "failed_count": 5,
-    "total_count": 100,
-    "failed_leads": [
-      {
-        "row": 6,
-        "email": "duplicate@example.com",
-        "phone": "+919876543210",
-        "error": "lead already exists with this email or phone"
-      }
-    ]
-  }
-  ```
-- **Error (400/500):** Invalid file or processing error
-
-**Validation Rules:**
-- **Name:** Required, 1-100 characters
-- **Email:** Required, valid email format
-- **Phone:** Required, E.164 format (e.g., +919876543210)
-- **Education:** Optional, max 200 characters
-- **Lead Source:** Optional, must be "website", "referral", or empty
-
-#### Get All Leads
-**GET** `/leads`
-- **Query Parameters:**
-  - `created_after` (optional): Filter leads created after this date/time (RFC3339 format, e.g., `2025-11-13T10:00:00Z`)
-  - `created_before` (optional): Filter leads created before this date/time (RFC3339 format, e.g., `2025-11-13T10:00:00Z`)
-- **Examples:**
-  - Get all leads: `GET /leads`
-  - Get leads created after a specific date: `GET /leads?created_after=2025-11-13T00:00:00Z`
-  - Get leads within a date range: `GET /leads?created_after=2025-11-01T00:00:00Z&created_before=2025-11-30T23:59:59Z`
-- **Response (200 OK):** 
-  ```json
-  {
-    "status": "success",
-    "message": "Retrieved 10 leads successfully",
-    "count": 10,
-    "data": [
-      {
-        "id": 1,
-        "name": "John Doe",
-        "email": "john@example.com",
-        "phone": "+919876543210",
-        "education": "B.Tech",
-        "lead_source": "website",
-        "payment_status": "pending",
-        "meet_link": "https://meet.google.com/abc-defg-hij",
-        "application_status": "new",
-        "created_at": "2025-11-17T15:05:34Z",
-        "updated_at": "2025-11-17T15:05:34Z"
-      }
-    ]
-  }
-  ```
-
-#### Create Lead
-**POST** `/create-lead`
-- **Request:**
-  ```json
-  {
-    "name": "Jane Smith",
-    "email": "jane@example.com",
-    "phone": "+919123456789",
-    "education": "Master's",
-    "lead_source": "referral"
-  }
-  ```
-- **Response (201 Created):**
-  ```json
-  {
-    "message": "Lead created successfully",
-    "student_id": 6,
-    "counsellor_name": "Counsellor Rishi",
-    "email": "jane@example.com"
-  }
-  ```
-- **Error Responses:**
-  - 400 Bad Request: Validation error (invalid email/phone format, missing required fields)
-  - 409 Conflict: Lead already exists with this email or phone
-  - 500 Server Error: Database error
-
-**Validation Rules:**
-- **Name:** Required, 1-100 characters
-- **Email:** Required, valid email format (must be unique)
-- **Phone:** Required, E.164 format (must be unique)
-- **Education:** Optional, max 200 characters
-- **Lead Source:** Optional, must be "website", "referral", or empty
-
-**Counselor Assignment:**
-- Automatically assigns available counselor based on lead source
-- Website leads: Assigned from any available counselor
-- Referral leads: Assigned from counselors with `is_referral_enabled = true`
-- Counselor selected by lowest assigned_count (round-robin distribution)
-
-### 2. Counselor Management
-
-#### Assign Counselor to Leads by Source
-**POST** `/assign-counsellor`
-- **Request:**
-  ```json
-  {"lead_source": "Website"}
-  ```
-- **Response (200 OK):**
-  ```json
-  {"message": "Counsellors assigned successfully"}
-  ```
-
-### 3. Meeting Management
-
-#### Schedule Meet
-**POST** `/schedule-meet`
-- **Request:**
-  ```json
-  {"student_id": 1}
-  ```
-- **Response (200 OK):**
-  ```json
-  {"meet_link": "https://meet.google.com/abc-defg-hij"}
-  ```
-
-### 4. Payment Management
-
-#### Initiate Payment
-**POST** `/initiate-payment`
-- **Request:**
-  ```json
-  {"student_id": 1, "amount": 50000.00}
-  ```
-- **Response (200 OK):**
-  ```json
-  {
-    "order_id": "order_Ju2n5n1nWPVL2Z",
-    "amount": 50000.00,
-    "currency": "INR",
-    "receipt": "rcpt_1"
-  }
-  ```
-- **Kafka Event:** `payment.initiated`
-
-#### Verify Payment
-**POST** `/verify-payment`
-- **Request:**
-  ```json
-  {
-    "order_id": "order_Ju2n5n1nWPVL2Z",
-    "payment_id": "pay_Ju2n56TryLkl2Z",
-    "razorpay_signature": "9ef4dffbfd84f1318f6739a3ce19f9d85851857ae648f114332d8401e0949a3d"
-  }
-  ```
-- **Response (200 OK):**
-  ```json
-  {"message": "Payment verified successfully", "status": "PAID", "student_id": "1", "order_id": "order_Ju2n5n1nWPVL2Z"}
-  ```
-- **Kafka Event:** `payment.verified`
-
-### 5. Application Action
-**POST** `/application-action`
-- **Request:**
-  ```json
-  {"student_id": 1, "status": "ACCEPTED"}
-  ```
-- **Response (200 OK):**
-  - For ACCEPTED status:
-    ```json
-    {"message": "Application accepted and offer letter sent to John Doe"}
-    ```
-  - For REJECTED status:
-    ```json
-    {"message": "Application rejected and notification sent to John Doe"}
-    ```
-  ```
-
-### 6. Static Files
-**GET** `/static/{filename}`
-- Serves static files (e.g., `/static/test-payment.html`)
-
-## Kafka Integration
-
-### Overview
-Kafka enables event-driven architecture for real-time data streaming. Events are published for lead creation and payment lifecycle.
-
-### Implementation
-- **Service:** `http/services/kafka.go` - Thread-safe producer with retry logic (3 attempts, exponential backoff).
-- **Initialization:** Producer initialized at server startup.
-- **Events Published:**
-  - `lead.created`: On lead upload/create.
-  - `payment.initiated`: On payment order creation.
-  - `payment.verified`: On payment verification.
-
-### Event Payloads
+All successful responses follow this structure:
 ```json
-// lead.created
 {
-  "event": "lead.created",
-  "lead_id": 1,
+  "status": "success",
+  "message": "Descriptive message",
+  "data": {}
+}
+```
+
+All error responses:
+```json
+{
+  "status": "error",
+  "error": "Error description"
+}
+```
+
+---
+
+## Lead Management Endpoints
+
+### 1. Create Lead
+**POST** `/create-lead`
+
+Creates a new student lead and assigns a counselor.
+
+**Request:**
+```json
+{
   "name": "John Doe",
   "email": "john@example.com",
   "phone": "+919876543210",
-  "education": "Bachelor's",
-  "lead_source": "Website",
-  "ts": "2025-11-13T10:30:45Z"
+  "education": "B.Tech Computer Science",
+  "lead_source": "website"
 }
+```
 
-// payment.initiated
+**Response (201 Created):**
+```json
+{
+  "status": "success",
+  "message": "Lead created successfully",
+  "data": {
+    "student_id": 1,
+    "name": "John Doe",
+    "email": "john@example.com",
+    "phone": "+919876543210",
+    "counsellor_name": "Counselor Rishi",
+    "counsellor_email": "rishi@university.edu"
+  }
+}
+```
+
+**Validation Rules:**
+- **name**: Required, 1-255 characters
+- **email**: Required, valid email format, must be unique
+- **phone**: Required, E.164 format (e.g., `+919876543210`), must be unique
+- **education**: Optional, max 255 characters
+- **lead_source**: Optional, must be "website", "referral", or omitted
+
+**Counselor Assignment Logic:**
+- Website leads: Assigned from any available counselor
+- Referral leads: Assigned from counselors with `is_referral_enabled = true`
+- Selection: Counselor with lowest `assigned_count` (round-robin)
+- Returns error if no available counselors
+
+**Error Responses:**
+- `400 Bad Request`: Validation failed
+- `409 Conflict`: Email or phone already exists
+- `500 Internal Server Error`: Database error
+
+---
+
+### 2. Get All Leads
+**GET** `/leads`
+
+Retrieves all leads with optional date filtering.
+
+**Query Parameters:**
+- `created_after` (optional): RFC3339 format (e.g., `2025-11-13T10:00:00Z`)
+- `created_before` (optional): RFC3339 format
+
+**Examples:**
+```bash
+# Get all leads
+GET /leads
+
+# Get leads after specific date
+GET /leads?created_after=2025-11-13T00:00:00Z
+
+# Get leads within date range
+GET /leads?created_after=2025-11-01T00:00:00Z&created_before=2025-11-30T23:59:59Z
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Retrieved 5 leads successfully",
+  "count": 5,
+  "data": [
+    {
+      "id": 1,
+      "name": "John Doe",
+      "email": "john@example.com",
+      "phone": "+919876543210",
+      "education": "B.Tech",
+      "lead_source": "website",
+      "meet_link": "https://meet.google.com/abc-defg-hij",
+      "application_status": "NEW",
+      "selected_course_id": null,
+      "interview_scheduled_at": null,
+      "created_at": "2025-11-17T15:05:34Z",
+      "updated_at": "2025-11-17T15:05:34Z"
+    }
+  ]
+}
+```
+
+---
+
+### 3. Upload Leads (Bulk)
+**POST** `/upload-leads`
+
+Upload multiple leads from an Excel file (.xlsx).
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- File: Excel file with columns: name, email, phone, education, lead_source
+
+**Excel Format:**
+| name | email | phone | education | lead_source |
+|------|-------|-------|-----------|-------------|
+| John Doe | john@example.com | +919876543210 | B.Tech | website |
+| Jane Smith | jane@example.com | +919123456789 | M.Tech | referral |
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Successfully uploaded 100 leads",
+  "data": {
+    "total_count": 100,
+    "success_count": 98,
+    "failed_count": 2,
+    "failed_leads": [
+      {
+        "row": 5,
+        "email": "duplicate@example.com",
+        "phone": "+919876543210",
+        "error": "lead already exists with this email or phone"
+      },
+      {
+        "row": 12,
+        "email": "invalid@",
+        "phone": "+919111111111",
+        "error": "invalid email format"
+      }
+    ]
+  }
+}
+```
+
+**Features:**
+- Deduplicates leads within file
+- Validates each lead independently
+- Returns detailed error messages with row numbers
+- Continues processing despite failures
+- Assigns counselors to successful leads
+
+---
+
+## Payment Management Endpoints
+
+### Payment Flow
+The system supports two separate payment types:
+1. **Registration Fee**: Fixed fee to register, schedules interview automatically
+2. **Course Fee**: Variable fee per course, stores course selection
+
+### 1. Initiate Payment
+**POST** `/initiate-payment`
+
+Creates a Razorpay order for registration or course fee payment.
+
+**Request for Registration Fee:**
+```json
+{
+  "student_id": 1,
+  "payment_type": "REGISTRATION"
+}
+```
+
+**Request for Course Fee:**
+```json
+{
+  "student_id": 1,
+  "payment_type": "COURSE_FEE",
+  "course_id": 2
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Payment order created",
+  "data": {
+    "order_id": "order_Rh9Vc899yylv78",
+    "amount": 1870.0,
+    "currency": "INR",
+    "receipt": "rcpt_1_REGISTRATION"
+  }
+}
+```
+
+**Payment Type Details:**
+
+**REGISTRATION:**
+- Fixed amount: ₹1,870
+- Creates `registration_payment` record
+- Updates `registration_fee_status` to PENDING
+- On verification: Auto-schedules interview 1 hour later
+
+**COURSE_FEE:**
+- Requires `course_id` parameter
+- Amount: From course fee table
+- Creates `course_payment` record
+- Updates `course_fee_status` to PENDING
+- On verification: Stores `selected_course_id`
+
+**Behavior:**
+- If PENDING payment exists: Updates with new `order_id` (allows retry)
+- If PAID payment exists: Returns error (can't re-pay)
+- First attempt: Creates new payment record
+
+**Error Responses:**
+- `400 Bad Request`: Missing required fields or invalid payment_type
+- `404 Not Found`: Student or course not found
+- `409 Conflict`: Course fee already paid
+- `500 Internal Server Error`: Payment creation failed
+
+---
+
+### 2. Verify Payment
+**POST** `/verify-payment`
+
+Verifies Razorpay payment signature and updates payment status to PAID.
+
+**Request:**
+```json
+{
+  "order_id": "order_Rh9Vc899yylv78",
+  "payment_id": "pay_Rh9Vc899yylv78",
+  "razorpay_signature": "9ef4dffbfd84f1318f6739a3ce19f9d85851857ae648f114332d8401e0949a3d"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Payment verified successfully",
+  "data": {
+    "student_id": 1,
+    "order_id": "order_Rh9Vc899yylv78",
+    "payment_id": "pay_Rh9Vc899yylv78",
+    "status": "PAID"
+  }
+}
+```
+
+**Updates on Success:**
+
+**For Registration Payment:**
+- Sets `registration_payment.status` = PAID
+- Sets `student_lead.registration_fee_status` = PAID
+- Sets `student_lead.interview_scheduled_at` = NOW + 1 hour
+- Sets `student_lead.application_status` = INTERVIEW_SCHEDULED
+- Stores `registration_payment_id` in student_lead
+
+**For Course Payment:**
+- Sets `course_payment.status` = PAID
+- Sets `student_lead.course_fee_status` = PAID
+- Stores `selected_course_id` and `course_payment_id` in student_lead
+- Sends confirmation email to student
+
+**Error Responses:**
+- `400 Bad Request`: Missing required fields
+- `404 Not Found`: Payment not found
+- `401 Unauthorized`: Invalid signature (payment rejected)
+- `500 Internal Server Error`: Verification failed
+
+---
+
+## Counselor Management Endpoints
+
+### Assign Counselor
+**POST** `/assign-counsellor`
+
+Manually assigns counselors to leads (typically runs after bulk upload).
+
+**Request:**
+```json
+{
+  "lead_source": "website"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Counsellors assigned successfully"
+}
+```
+
+---
+
+## Meeting Management Endpoints
+
+### Schedule Meet
+**POST** `/schedule-meet`
+
+Schedules Google Meet for a student and sends meeting link.
+
+**Request:**
+```json
+{
+  "student_id": 1
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "Meeting scheduled successfully",
+  "data": {
+    "meet_link": "https://meet.google.com/abc-defg-hij",
+    "student_id": 1,
+    "scheduled_at": "2025-11-18T10:30:00Z"
+  }
+}
+```
+
+---
+
+## Application Management Endpoints
+
+### Application Action
+**POST** `/application-action`
+
+Updates application status (ACCEPTED/REJECTED) and sends notification.
+
+**Request:**
+```json
+{
+  "student_id": 1,
+  "status": "ACCEPTED"
+}
+```
+
+**Response (200 OK - ACCEPTED):**
+```json
+{
+  "status": "success",
+  "message": "Application accepted and offer letter sent to John Doe"
+}
+```
+
+**Response (200 OK - REJECTED):**
+```json
+{
+  "status": "success",
+  "message": "Application rejected and notification sent to John Doe"
+}
+```
+
+**Behavior:**
+- **ACCEPTED**: Generates offer letter, sends to student email
+- **REJECTED**: Sends rejection notification
+
+---
+
+## Static Files
+
+### Serve Static Files
+**GET** `/static/{filename}`
+
+Serves static files (test pages, assets).
+
+**Example:**
+```bash
+GET /static/test-payment.html
+```
+
+---
+
+## Kafka Integration
+
+### Event-Driven Architecture
+Kafka enables real-time event streaming for admission workflow.
+
+### Events Published
+
+#### 1. `lead.created`
+Published when a lead is created (single or bulk).
+
+```json
+{
+  "event": "lead.created",
+  "student_id": 1,
+  "name": "John Doe",
+  "email": "john@example.com",
+  "phone": "+919876543210",
+  "education": "B.Tech",
+  "lead_source": "website",
+  "counselor_id": 5,
+  "counselor_name": "Rishi",
+  "ts": "2025-11-18T10:30:45Z"
+}
+```
+
+#### 2. `payment.initiated`
+Published when payment order is created.
+
+```json
 {
   "event": "payment.initiated",
   "student_id": 1,
-  "order_id": "order_12345abc",
-  "amount": 50000,
+  "order_id": "order_Rh9Vc899yylv78",
+  "amount": 1870.0,
   "currency": "INR",
+  "payment_type": "REGISTRATION",
   "status": "PENDING",
-  "ts": "2025-11-13T10:40:10Z"
+  "ts": "2025-11-18T10:40:10Z"
 }
+```
 
-// payment.verified
+#### 3. `payment.verified`
+Published when payment is verified and PAID.
+
+```json
 {
   "event": "payment.verified",
   "student_id": 1,
-  "order_id": "order_12345abc",
-  "payment_id": "pay_12345def",
+  "order_id": "order_Rh9Vc899yylv78",
+  "payment_id": "pay_Rh9Vc899yylv78",
+  "payment_type": "REGISTRATION",
   "status": "PAID",
-  "ts": "2025-11-13T10:42:55Z"
+  "ts": "2025-11-18T10:42:55Z"
 }
 ```
 
-### Local Development
-1. Start Kafka: `docker-compose up -d`
-2. Consume events:
-   ```bash
-   docker exec -it <kafka-container> kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic admissions.payments --from-beginning
-   ```
+### Kafka Setup
 
-### Error Handling
-- Non-blocking: Server continues if Kafka fails.
-- Retry: 3 attempts with backoff.
-- Monitoring: `IsConnected()` for status.
-
-## Database Schema
-
-### Current Tables
-
-```sql
-CREATE TABLE leads (
-  id SERIAL PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  email VARCHAR(255) NOT NULL UNIQUE,
-  phone VARCHAR(20) NOT NULL UNIQUE,
-  education VARCHAR(255),
-  lead_source VARCHAR(50),
-  counsellor_id BIGINT REFERENCES counsellors(id) ON DELETE SET NULL,
-  payment_status VARCHAR(50),
-  meet_link TEXT,
-  application_status VARCHAR(50),
-  created_at TIMESTAMP NOT NULL,
-  updated_at TIMESTAMP NOT NULL,
-  last_modified_by VARCHAR(100),
-  notes TEXT
-);
-
-CREATE TABLE counsellors (
-  id SERIAL PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  email VARCHAR(255),
-  phone VARCHAR(20),
-  assigned_count INTEGER DEFAULT 0,
-  max_capacity INTEGER NOT NULL,
-  is_referral_enabled BOOLEAN DEFAULT true,
-  created_at TIMESTAMP,
-  updated_at TIMESTAMP
-);
-
-CREATE TABLE payments (
-  id SERIAL PRIMARY KEY,
-  student_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
-  amount DECIMAL(10, 2),
-  status VARCHAR(50),
-  order_id VARCHAR(255) UNIQUE,
-  payment_id VARCHAR(255),
-  razorpay_sign VARCHAR(255),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE lead_history (
-  id SERIAL PRIMARY KEY,
-  lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
-  field_name VARCHAR(50) NOT NULL,
-  old_value TEXT,
-  new_value TEXT,
-  changed_by VARCHAR(100),
-  changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE VIEW counsellor_workload AS
-SELECT 
-  c.id,
-  c.name,
-  c.assigned_count,
-  c.max_capacity,
-  ROUND((c.assigned_count::NUMERIC / c.max_capacity) * 100, 2) as capacity_percentage,
-  c.max_capacity - c.assigned_count as available_slots,
-  c.is_referral_enabled,
-  COUNT(l.id) as actual_lead_count
-FROM counsellors c
-LEFT JOIN leads l ON l.counsellor_id = c.id
-GROUP BY c.id, c.name, c.assigned_count, c.max_capacity, c.is_referral_enabled
-ORDER BY capacity_percentage DESC;
-```
-
-### Indexes for Performance
-
-```sql
-CREATE INDEX idx_leads_email ON leads(email);
-CREATE INDEX idx_leads_phone ON leads(phone);
-CREATE INDEX idx_leads_created_at ON leads(created_at);
-CREATE INDEX idx_leads_counsellor_id ON leads(counsellor_id);
-CREATE INDEX idx_counsellors_assignment ON counsellors(assigned_count, id) WHERE assigned_count < max_capacity;
-CREATE INDEX idx_lead_history_lead_id ON lead_history(lead_id);
-CREATE INDEX idx_lead_history_changed_at ON lead_history(changed_at);
-```
-
-## Database Migrations
-
-### Latest Migration: Counselor Assignment Improvement
-**File:** `migrations/001_improve_counsellor_assignment.sql`
-
-**Changes:**
-- Add `is_referral_enabled` column to counselors
-- Create performance indexes for fast queries
-- Add optional audit tracking (lead_history table)
-- Create counselor_workload monitoring view
-
-**Running Migration:**
+**Start Kafka:**
 ```bash
-# Using psql
-psql -U username -d database_name -f migrations/001_improve_counsellor_assignment.sql
-
-# Or execute the SQL file in your database client
+docker-compose up -d
 ```
 
-**Data Consistency Check:**
-```sql
--- Verify assigned_count matches actual leads
-SELECT 
-    c.id, c.name, c.assigned_count as recorded_count,
-    COUNT(l.id) as actual_count,
-    c.assigned_count - COUNT(l.id) as difference
-FROM counsellors c
-LEFT JOIN leads l ON l.counsellor_id = c.id
-GROUP BY c.id, c.name, c.assigned_count
-HAVING c.assigned_count != COUNT(l.id);
+**Consume Events:**
+```bash
+docker exec -it <kafka-container> kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic admissions.payments \
+  --from-beginning
 ```
 
-**Fix Inconsistencies:**
-```sql
-UPDATE counsellors c
-SET assigned_count = (
-    SELECT COUNT(*) FROM leads l WHERE l.counsellor_id = c.id
-);
+### Configuration
+- **Producer:** Initialized at server startup
+- **Retry Logic:** 3 attempts with exponential backoff
+- **Non-blocking:** Server continues if Kafka fails
+- **Topic:** `admissions.payments`
+
+---
+
+## Input Validation Rules
+
+### Email Format
+```regex
+^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$
 ```
+
+**Valid Examples:**
+- `user@example.com`
+- `first.last@domain.co.uk`
+- `user+tag@email.com`
+
+**Invalid Examples:**
+- `invalid.email@`
+- `@nodomain.com`
+- `no-at-sign.com`
+
+### Phone Format (E.164)
+```regex
+^\+?[1-9]\d{1,14}$
+```
+
+**Valid Examples:**
+- `+919876543210` (India)
+- `+12025550123` (USA)
+- `+441234567890` (UK)
+- `19876543210` (with + optional)
+
+**Invalid Examples:**
+- `9876543210` (missing country code)
+- `(123) 456-7890` (formatting characters)
+- `+1` (incomplete)
+- `+0123456789` (leading zero invalid)
+
+### Lead Source
+```
+Valid values: "website", "referral"
+If omitted: Treated as general lead (no source preference)
+```
+
+---
+
+## Error Handling
+
+### HTTP Status Codes
+| Code | Meaning | Example |
+|------|---------|---------|
+| 200 | Success | Lead retrieved successfully |
+| 201 | Created | Lead created successfully |
+| 400 | Bad Request | Invalid email format, missing field |
+| 404 | Not Found | Student ID not found, course not found |
+| 409 | Conflict | Email already exists, payment already paid |
+| 500 | Server Error | Database error, service unavailable |
+
+### Error Response Format
+```json
+{
+  "status": "error",
+  "error": "Specific error message"
+}
+```
+
+### Common Errors
+
+**Invalid Email (400):**
+```json
+{
+  "status": "error",
+  "error": "invalid email format"
+}
+```
+
+**Duplicate Email (409):**
+```json
+{
+  "status": "error",
+  "error": "lead already exists with this email or phone"
+}
+```
+
+**Invalid Phone (400):**
+```json
+{
+  "status": "error",
+  "error": "invalid phone format (use E.164 format, e.g., +919876543210)"
+}
+```
+
+**Student Not Found (404):**
+```json
+{
+  "status": "error",
+  "error": "student not found"
+}
+```
+
+**Payment Already Paid (409):**
+```json
+{
+  "status": "error",
+  "error": "course payment already completed"
+}
+```
+
+---
 
 ## Running the Application
 
-### Development Setup
-1. **Navigate to project root:**
-   ```bash
-   cd admission-module
-   ```
+### Development
+```bash
+# Install dependencies
+go mod tidy
 
-2. **Install dependencies:**
-   ```bash
-   go mod tidy
-   ```
+# Create .env file with credentials
+# (See Configuration section)
 
-3. **Configure environment:**
-   - Create/update `.env` file with your database and service credentials
-   - See Configuration section above for all environment variables
+# Run server
+go run ./cmd/server
 
-4. **Apply database migrations:**
-   ```bash
-   psql -U username -d database_name -f migrations/001_improve_counsellor_assignment.sql
-   ```
-
-5. **Start dependencies (optional):**
-   ```bash
-   docker-compose up -d
-   ```
-
-6. **Run server in development:**
-   ```bash
-   go run ./cmd/server
-   ```
+# Server starts on http://localhost:8080
+```
 
 ### Production Build
-
-**Build executable:**
 ```bash
+# Build executable
 go build -o admission-server.exe ./cmd/server
-```
 
-**Run with environment variables:**
-```bash
-# Windows PowerShell
-$env:DB_HOST="your-db-host"
-$env:DB_PORT="5432"
-$env:DB_USER="postgres"
-$env:DB_PASSWORD="your-password"
-$env:DB_NAME="admission_db"
-./admission-server.exe
-
-# Or using .env file
-# Ensure .env is in the same directory as executable
+# Run with environment variables
+$env:DB_HOST="prod-db.example.com"
+$env:RazorpayKeyID="rzp_live_xxxxx"
 ./admission-server.exe
 ```
 
-### Docker Deployment
-
-**Build Docker image:**
+### Docker
 ```bash
+# Build image
 docker build -t admission-module:latest .
-```
 
-**Run container:**
-```bash
+# Run container
 docker run -p 8080:8080 \
   -e DB_HOST=postgres \
-  -e DB_PORT=5432 \
   -e DB_USER=postgres \
-  -e DB_PASSWORD=secret \
-  -e DB_NAME=admission_db \
-  -e KAFKA_BROKERS=kafka:9092 \
+  -e RazorpayKeyID=rzp_test_xxxxx \
   admission-module:latest
 ```
 
+---
+
 ## Testing
 
-### Using Postman
-1. Import `admission_module_postman_collection.json` into Postman
-2. Update variables (base URL, student_id, etc.) as needed
-3. Execute test requests
-
-### cURL Examples
+### Using cURL
 
 **Create Lead:**
 ```bash
@@ -561,7 +852,7 @@ curl -X POST http://localhost:8080/create-lead \
   }'
 ```
 
-**Get All Leads:**
+**Get Leads:**
 ```bash
 curl -X GET "http://localhost:8080/leads"
 ```
@@ -571,268 +862,125 @@ curl -X GET "http://localhost:8080/leads"
 curl -X GET "http://localhost:8080/leads?created_after=2025-11-17T00:00:00Z"
 ```
 
-**Upload Leads from Excel:**
+**Upload Leads:**
 ```bash
 curl -X POST http://localhost:8080/upload-leads \
   -F "file=@leads.xlsx"
 ```
 
-**Initiate Payment:**
+**Initiate Registration Payment:**
 ```bash
 curl -X POST http://localhost:8080/initiate-payment \
   -H "Content-Type: application/json" \
-  -d '{"student_id": 1, "amount": 50000}'
+  -d '{
+    "student_id": 1,
+    "payment_type": "REGISTRATION"
+  }'
 ```
 
-### Unit Tests
+**Initiate Course Fee Payment:**
 ```bash
-go test ./...
+curl -X POST http://localhost:8080/initiate-payment \
+  -H "Content-Type: application/json" \
+  -d '{
+    "student_id": 1,
+    "payment_type": "COURSE_FEE",
+    "course_id": 2
+  }'
 ```
 
-### Integration Tests
+**Verify Payment:**
 ```bash
-# Run tests with coverage
-go test -v -cover ./...
-
-# Generate coverage report
-go test -v -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+curl -X POST http://localhost:8080/verify-payment \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "order_Rh9Vc899yylv78",
+    "payment_id": "pay_Rh9Vc899yylv78",
+    "razorpay_signature": "9ef4dffbfd84f1318f6739a3ce19f9d85851857ae648f114332d8401e0949a3d"
+  }'
 ```
 
-## Monitoring & Debugging
+### Using Postman
+1. Import `admission_module_postman_collection.json`
+2. Update environment variables
+3. Execute test requests
 
-### Server Logs
-- Server logs output to terminal
-- Look for:
-  - Startup messages (database connection, Kafka initialization)
-  - Request logs (timestamp, method, path, status)
-  - Error logs (with context and stack traces)
-
-### Health Check
-```bash
-curl -X GET http://localhost:8080/leads
-# Returns structured response with status "success"
-```
-
-### Database Connections
-```bash
-# Check PostgreSQL connection
-psql -U postgres -d admission_db -c "SELECT version();"
-
-# Check leads count
-psql -U postgres -d admission_db -c "SELECT COUNT(*) FROM leads;"
-```
-
-### Kafka Monitoring
-```bash
-# View Docker logs
-docker-compose logs -f kafka
-
-# Connect to Kafka container and list topics
-docker exec -it <kafka-container> kafka-topics.sh --bootstrap-server localhost:9092 --list
-
-# Consume events from topic
-docker exec -it <kafka-container> kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic admissions.payments \
-  --from-beginning
-```
-
-## Architecture
-
-### Service-Oriented Design
-The application follows a service-oriented architecture with clear separation of concerns:
-
-```
-HTTP Request → Handler (method validation) → Service → Database
-              ↓ (validation)      ↓ (transaction)
-              Logging & Response  Persistence
-```
-
-### LeadService Structure
-```go
-type LeadService struct {
-    db *sql.DB  // Database connection
-}
-
-// Methods
-- UploadLeads(w, r)          // Bulk lead import from Excel
-- GetLeads(w, r)             // Retrieve leads with filters
-- CreateLead(w, r)           // Create single lead
-- processAndInsertLead()     // Transaction-safe processing
-- assignCounsellorTx()       // Counselor assignment logic
-- deduplicateLeads()         // Remove duplicates from upload
-```
-
-### Response Types
-All API responses use structured types:
-
-**LeadResponse** (for individual leads)
-```go
-type LeadResponse struct {
-    ID                int    `json:"id"`
-    Name              string `json:"name"`
-    Email             string `json:"email"`
-    Phone             string `json:"phone"`
-    Education         string `json:"education"`
-    LeadSource        string `json:"lead_source"`
-    PaymentStatus     string `json:"payment_status"`
-    MeetLink          string `json:"meet_link"`
-    ApplicationStatus string `json:"application_status"`
-    CreatedAt         string `json:"created_at"`      // RFC3339 format
-    UpdatedAt         string `json:"updated_at"`      // RFC3339 format
-}
-```
-
-**GetLeadsResponse** (for list endpoints)
-```go
-type GetLeadsResponse struct {
-    Status  string            `json:"status"`        // "success"
-    Message string            `json:"message"`       // Descriptive message
-    Count   int               `json:"count"`         // Number of records
-    Data    []LeadResponse    `json:"data"`          // Array of leads
-}
-```
-
-### Middleware & Security
-- **CORS:** Configured for cross-origin requests
-- **Content-Type:** Enforced (application/json for API endpoints)
-- **Input Validation:** Regex patterns for email and phone
-- **SQL Injection:** Protected via parameterized queries
-- **Rate Limiting:** Configurable per deployment
-
-## Validation & Business Rules
-
-### Email Validation
-```regex
-^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$
-```
-- Valid: `user@example.com`, `test.user+tag@domain.co.uk`
-- Invalid: `invalid.email@`, `@nodomain.com`
-
-### Phone Validation (E.164 Format)
-```regex
-^\+?[1-9]\d{1,14}$
-```
-- Valid: `+919876543210`, `+12025550123`, `+441234567890`
-- Invalid: `9876543210`, `(123) 456-7890`, `+1`, `+0123456789`
-
-**Note:** E.164 format is the international standard:
-- Country code (1-3 digits)
-- Leading + (optional in regex but recommended)
-- Max 15 total digits
-- No spaces, dashes, or special characters
-
-### Lead Source Constants
-```go
-// Valid values
-constants.SourceWebsite   // "website"
-constants.SourceReferral  // "referral"
-// Empty string is also allowed (optional field)
-```
-
-## Error Handling
-All errors follow consistent format:
-```json
-{
-  "error": "Descriptive error message"
-}
-```
-
-**HTTP Status Codes:**
-- `200 OK` - Successful GET request
-- `201 Created` - Successful resource creation
-- `400 Bad Request` - Validation error, invalid JSON, or missing required fields
-- `405 Method Not Allowed` - Wrong HTTP method used
-- `409 Conflict` - Resource already exists (duplicate lead)
-- `500 Internal Server Error` - Database or server error
-
-**Common Error Responses:**
-
-1. **Validation Errors (400)**
-   ```json
-   {
-     "error": "invalid phone format (use E.164 format, e.g., +919876543210)"
-   }
-   ```
-
-2. **Duplicate Lead (409)**
-   ```json
-   {
-     "error": "lead already exists with this email or phone"
-   }
-   ```
-
-3. **Invalid JSON (400)**
-   ```json
-   {
-     "error": "Invalid JSON: unexpected EOF"
-   }
-   ```
-
-## Transaction Safety & Concurrency
-
-### Lead Creation Process
-All lead operations (upload/create) are transaction-safe:
-
-1. **Begins transaction** with `ReadCommitted` isolation level
-2. **Validates lead data** (email, phone, required fields)
-3. **Checks for duplicates** within transaction
-4. **Assigns counselor** with row-level locking (`FOR UPDATE SKIP LOCKED`)
-5. **Inserts lead** record
-6. **Updates counselor** count atomically
-7. **Commits transaction** on success, **rolls back** on any error
-
-**Benefits:**
-- ✅ Prevents race conditions during concurrent lead creation
-- ✅ Ensures counselor capacity constraints are respected
-- ✅ Automatic rollback on any error (no partial updates)
-- ✅ Non-blocking with `SKIP LOCKED` (no lock contention)
-
-### Counselor Assignment Algorithm
-```sql
--- Website leads: Any available counselor
-SELECT id FROM counsellors 
-WHERE assigned_count < max_capacity 
-ORDER BY assigned_count ASC, id ASC 
-LIMIT 1 FOR UPDATE SKIP LOCKED
-
--- Referral leads: Only referral-enabled counselors
-SELECT id FROM counsellors 
-WHERE is_referral_enabled = true 
-AND assigned_count < max_capacity 
-ORDER BY assigned_count ASC, id ASC 
-LIMIT 1 FOR UPDATE SKIP LOCKED
-```
-
-**Distribution Strategy:**
-- Round-robin by `assigned_count` (lowest first)
-- Deterministic by `id` (consistent results)
-- Lock-free with `SKIP LOCKED` (prevents blocking)
-- Transaction-safe with `FOR UPDATE` (prevents race conditions)
-
-### Bulk Upload Deduplication
-- **Within file:** Removes duplicate email+phone combinations
-- **Database:** Enforces unique constraints on email and phone
-- **Detailed feedback:** Returns row number and reason for each failure
-- **Atomic operations:** Each lead processed in separate transaction
+---
 
 ## Troubleshooting
 
-### Common Issues
-- **DB Connection:** Verify PostgreSQL running and credentials.
-- **Kafka Refused:** Start with `docker-compose up -d`, wait 10s.
-- **Port In Use:** Change port in `main.go` or kill process.
-- **Module Errors:** Run `go mod tidy`.
+### Issue: Connection Refused
+**Solution:** 
+- Verify PostgreSQL is running
+- Check `DB_HOST` and `DB_PORT` in `.env`
+- Verify database exists
 
-### Kafka Issues
-- Ensure `KAFKA_BROKERS` set correctly.
-- Check Docker network.
+### Issue: Payment Order Creation Fails
+**Solution:**
+- Verify Razorpay credentials in `.env`
+- Check `RazorpayKeyID` and `RazorpayKeySecret`
+- Ensure using test credentials for development
+
+### Issue: Kafka Connection Failed
+**Solution:**
+- Start Kafka: `docker-compose up -d`
+- Wait 10 seconds for Kafka to initialize
+- Check `KAFKA_BROKERS` environment variable
+
+### Issue: Duplicate Lead Error on Retry
+**Solution:**
+- This is expected behavior - email and phone are unique
+- Use different email/phone or delete the existing lead
+- For payments: You can retry with the same student_id if status is PENDING
+
+### Issue: Email Not Sending
+**Solution:**
+- Verify SMTP credentials in `.env`
+- Check `EMAIL_FROM` address format
+- Enable "Less Secure App Access" for Gmail
+
+---
+
+## Architecture
+
+### Request Flow
+```
+HTTP Request
+    ↓
+Handler (method validation, request parsing)
+    ↓
+Service (business logic, database operations)
+    ↓
+Database / External Services (Razorpay, Kafka, Email)
+    ↓
+Response
+```
+
+### Key Design Patterns
+
+**Service-Oriented:**
+- Each domain has dedicated service (PaymentService, NotificationService)
+- Clear separation between HTTP handlers and business logic
+
+**Transaction-Safe:**
+- All multi-step operations use database transactions
+- Automatic rollback on any error
+- Row-level locking prevents race conditions
+
+**Event-Driven:**
+- Events published to Kafka for real-time processing
+- Non-blocking (failures don't affect main flow)
+- Async event handling by consumers
+
+---
 
 ## Future Enhancements
-- Add more events (counselor assignments, application changes).
-- Schema registry for events.
-- Consumer applications (notifications, analytics).
-- Monitoring with Prometheus/Grafana.
-- SASL/SSL for Kafka.
-- Circuit breaker for outages.
+- SMS notifications via Twilio
+- Batch email sending via SendGrid
+- Payment analytics dashboard
+- Interview scheduling calendar
+- Document upload/management
+- Application tracking system
+- Admin portal for managing counselors/courses
+- API rate limiting
+- Request authentication/authorization
