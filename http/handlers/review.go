@@ -57,15 +57,11 @@ func handleApplicationAcceptance(w http.ResponseWriter, appService *services.App
 		return
 	}
 
-	// Send acceptance email asynchronously
+	// Send acceptance email asynchronously (includes Kafka event publishing)
 	go func() {
-
-		services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
-
 		if err := services.SendAcceptanceEmail(result.StudentName, result.StudentEmail, result.CourseName, result.CourseFee); err != nil {
 			log.Printf("Warning: failed to send acceptance email: %v", err)
 		}
-		//services.PublishApplicationEvent("accepted", studentID, result.StudentEmail, result.CourseName, "accepted")
 	}()
 
 	// Return success response with payment details
@@ -97,12 +93,11 @@ func handleApplicationRejection(w http.ResponseWriter, appService *services.Appl
 		return
 	}
 
-	// Send rejection email asynchronously
+	// Send rejection email asynchronously (includes Kafka event publishing)
 	go func() {
 		if err := services.SendRejectionEmail(result.StudentName, result.StudentEmail); err != nil {
 			log.Printf("Warning: failed to send rejection email: %v", err)
 		}
-		services.PublishApplicationEvent("rejected", studentID, result.StudentEmail, "", "rejected")
 	}()
 
 	// Return success response
