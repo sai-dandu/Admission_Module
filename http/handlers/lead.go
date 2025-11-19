@@ -3,8 +3,8 @@ package handlers
 import (
 	"admission-module/db"
 	resp "admission-module/http/response"
-	"admission-module/services"
 	"admission-module/models"
+	"admission-module/services"
 	"admission-module/utils"
 	"context"
 	"database/sql"
@@ -17,16 +17,19 @@ import (
 	"time"
 )
 
-// LeadService encapsulates lead management operations
+// LeadService handles all lead-related operations
+
 type LeadService struct {
 	db *sql.DB
 }
 
+// NewLeadService creates a new instance of LeadService with the provided database connection
 func NewLeadService(database *sql.DB) *LeadService {
 	return &LeadService{db: database}
 }
 
 // UploadLeads handles bulk lead upload via Excel file
+// It processes the uploaded file, validates leads, removes duplicates, and stores them in the database
 func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -35,6 +38,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Extract and validate file upload
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		log.Printf("Error getting form file: %v", err)
@@ -45,7 +49,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Processing file upload: %s", header.Filename)
 
-	// Create temp file with proper cleanup
+	// Create temporary file with automatic cleanup
 	tempFile, err := os.CreateTemp("", "leads_*.xlsx")
 	if err != nil {
 		log.Printf("Error creating temp file: %v", err)
@@ -58,6 +62,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 		os.Remove(tempFilePath)
 	}()
 
+	// Copy uploaded file to temp location
 	if _, err = io.Copy(tempFile, file); err != nil {
 		log.Printf("Error copying file: %v", err)
 		respondError(w, "Error saving file", http.StatusInternalServerError)
@@ -68,6 +73,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error closing temp file: %v", err)
 	}
 
+	// Parse Excel file
 	leads, err := services.ParseExcel(tempFilePath)
 	if err != nil {
 		log.Printf("Error parsing Excel: %v", err)
@@ -78,7 +84,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	// Remove duplicates within the uploaded file
 	leads = utils.DeduplicateLeads(leads)
 
-	// Process leads with proper error tracking
+	// Process each lead and track results
 	successCount := 0
 	failedLeads := []map[string]string{}
 
@@ -98,6 +104,7 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Bulk upload completed: %d successful, %d failed", successCount, len(failedLeads))
 
+	// Build response
 	response := map[string]interface{}{
 		"message":       fmt.Sprintf("Successfully uploaded %d leads", successCount),
 		"success_count": successCount,
@@ -112,22 +119,28 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, response)
 }
 
-// processAndInsertLead handles the complete lead creation process in a transaction
+// processAndInsertLead handles the complete lead creation workflow with transaction support
+// It validates the lead, checks for duplicates, assigns a counselor, and inserts the lead record
 func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lead) error {
+	// Set timestamps
+	now := time.Now()
+	lead.CreatedAt = now
+	lead.UpdatedAt = now
+
 	// Validate lead data
-	if err := validateLead(lead); err != nil {
+	if err := utils.ValidateLead(lead); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Start transaction
+	// Start database transaction
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Check for duplicate (within transaction)
-	exists, err := s.leadExistsTx(ctx, tx, lead.Email, lead.Phone)
+	// Check for duplicate lead
+	exists, err := utils.LeadExists(ctx, tx, lead.Email, lead.Phone)
 	if err != nil {
 		return fmt.Errorf("error checking duplicate: %w", err)
 	}
@@ -135,21 +148,29 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 		return fmt.Errorf("lead already exists with this email or phone")
 	}
 
-	// Assign counselor with row lock
-	if err := s.assignCounselorTx(ctx, tx, lead); err != nil {
-		return fmt.Errorf("error assigning counselor: %w", err)
+	// Assign counselor if not already assigned
+	if lead.CounsellorID == nil {
+		counselorID, err := utils.GetAvailableCounselorID(ctx, tx, lead.LeadSource)
+		if err != nil {
+			return fmt.Errorf("error assigning counselor: %w", err)
+		}
+		lead.CounsellorID = counselorID
+
+		if counselorID == nil {
+			log.Printf("Warning: No available counselor for lead source: %s", lead.LeadSource)
+		}
 	}
 
-	// Insert lead
-	leadID, err := s.insertLeadTx(ctx, tx, lead)
+	// Insert lead into database
+	leadID, err := utils.InsertLead(ctx, tx, lead)
 	if err != nil {
 		return fmt.Errorf("error inserting lead: %w", err)
 	}
 	lead.ID = int(leadID)
 
-	// Update counselor count atomically
+	// Update counselor assignment count atomically
 	if lead.CounsellorID != nil {
-		if err := s.updateCounselorCountTx(ctx, tx, *lead.CounsellorID); err != nil {
+		if err := utils.UpdateCounselorAssignmentCount(ctx, tx, *lead.CounsellorID); err != nil {
 			return fmt.Errorf("error updating counselor count: %w", err)
 		}
 	}
@@ -162,16 +183,17 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 	log.Printf("Lead created successfully: ID=%d, Email=%s, Counselor=%v",
 		leadID, lead.Email, lead.CounsellorID)
 
-	// Send welcome email with counselor information
+	// Send welcome email asynchronously (non-blocking)
 	if err := services.SendWelcomeEmailWithCounselorInfo(ctx, lead); err != nil {
 		log.Printf("Warning: failed to send welcome email: %v", err)
-		// Don't return error
+		// Don't fail the operation if email fails
 	}
 
 	return nil
 }
 
-// GetLeads retrieves leads with optional filters
+// GetLeads retrieves leads with optional time-based filters
+// It supports filtering by creation date and returns paginated results
 func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -187,7 +209,7 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build query with filters - Updated to use student_lead table
+	// Build dynamic query with filters
 	query := `
 		SELECT 
 			id, name, email, phone, education, lead_source, 
@@ -200,6 +222,7 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	argCount := 0
 
+	// Add time-based filters dynamically
 	if timeParams.CreatedAfter != nil {
 		argCount++
 		query += fmt.Sprintf(" AND created_at >= $%d", argCount)
@@ -223,6 +246,7 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// Scan results
 	leads := []models.Lead{}
 	for rows.Next() {
 		lead, err := utils.ScanLead(rows)
@@ -254,7 +278,8 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, response)
 }
 
-// CreateLead handles single lead creation
+// CreateLead handles single lead creation from JSON payload
+// It validates the lead data, assigns a counselor, and stores it in the database
 func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -263,6 +288,7 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Decode JSON request body
 	var lead models.Lead
 	if err := json.NewDecoder(r.Body).Decode(&lead); err != nil {
 		log.Printf("Error decoding JSON: %v", err)
@@ -274,11 +300,11 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	if err := s.processAndInsertLead(ctx, &lead); err != nil {
 		log.Printf("Error creating lead: %v", err)
 
-		// Determine appropriate status code based on error
+		// Determine appropriate HTTP status code based on error type
 		statusCode := http.StatusInternalServerError
 		if err.Error() == "lead already exists with this email or phone" {
 			statusCode = http.StatusConflict
-		} else if err.Error()[:10] == "validation" {
+		} else if len(err.Error()) > 10 && err.Error()[:10] == "validation" {
 			statusCode = http.StatusBadRequest
 		}
 
@@ -286,8 +312,8 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get counselor name for response
-	counselorName := s.getCounselorName(ctx, lead.CounsellorID)
+	// Fetch counselor name for response
+	counselorName := utils.GetCounselorNameByID(ctx, s.db, lead.CounsellorID)
 
 	response := CreateLeadResponse{
 		Message:       "Lead created successfully",
@@ -299,171 +325,9 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, response)
 }
 
-// Transaction-safe helper methods
+// Response types
 
-func (s *LeadService) assignCounselorTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) error {
-	if lead.CounsellorID != nil {
-		return nil // Already assigned
-	}
-
-	counselorID, err := s.getAvailableCounselorIDTx(ctx, tx, lead.LeadSource)
-	if err != nil {
-		return err
-	}
-
-	lead.CounsellorID = counselorID
-
-	if counselorID == nil {
-		log.Printf("Warning: No available counselor for lead source: %s", lead.LeadSource)
-	}
-
-	return nil
-}
-
-func (s *LeadService) getAvailableCounselorIDTx(ctx context.Context, tx *sql.Tx, leadSource string) (*int64, error) {
-	var query string
-
-	switch leadSource {
-	case utils.SourceWebsite:
-		query = `SELECT id FROM counselor 
-				 WHERE assigned_count < max_capacity 
-				 ORDER BY assigned_count ASC, id ASC 
-				 LIMIT 1 FOR UPDATE SKIP LOCKED`
-	case utils.SourceReferral:
-		query = `SELECT id FROM counselor 
-				 WHERE is_referral_enabled = true 
-				 AND assigned_count < max_capacity 
-				 ORDER BY assigned_count ASC, id ASC 
-				 LIMIT 1 FOR UPDATE SKIP LOCKED`
-	default:
-		query = `SELECT id FROM counselor 
-				 WHERE assigned_count < max_capacity 
-				 ORDER BY assigned_count ASC, id ASC 
-				 LIMIT 1 FOR UPDATE SKIP LOCKED`
-	}
-
-	var counselorID int64
-	err := tx.QueryRowContext(ctx, query).Scan(&counselorID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // No available counselor
-		}
-		return nil, err
-	}
-
-	return &counselorID, nil
-}
-
-func (s *LeadService) leadExistsTx(ctx context.Context, tx *sql.Tx, email, phone string) (bool, error) {
-	var count int
-	query := "SELECT COUNT(*) FROM student_lead WHERE email = $1 OR phone = $2"
-	err := tx.QueryRowContext(ctx, query, email, phone).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
-
-func (s *LeadService) insertLeadTx(ctx context.Context, tx *sql.Tx, lead *models.Lead) (int64, error) {
-	now := time.Now()
-
-	query := `
-		INSERT INTO student_lead (
-			name, email, phone, education, lead_source, 
-			counselor_id, registration_fee_status, course_fee_status, meet_link, 
-			application_status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		RETURNING id`
-
-	var leadID int64
-	err := tx.QueryRowContext(
-		ctx,
-		query,
-		lead.Name,
-		lead.Email,
-		lead.Phone,
-		lead.Education,
-		lead.LeadSource,
-		lead.CounsellorID,
-		"PENDING",
-		"PENDING",
-		lead.MeetLink,
-		lead.ApplicationStatus,
-		now,
-		now,
-	).Scan(&leadID)
-
-	if err != nil {
-		return 0, err
-	}
-
-	return leadID, nil
-}
-
-func (s *LeadService) updateCounselorCountTx(ctx context.Context, tx *sql.Tx, counselorID int64) error {
-	query := "UPDATE counselor SET assigned_count = assigned_count + 1 WHERE id = $1"
-	result, err := tx.ExecContext(ctx, query, counselorID)
-	if err != nil {
-		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("counselor not found: %d", counselorID)
-	}
-
-	return nil
-}
-
-func (s *LeadService) getCounselorName(ctx context.Context, counselorID *int64) string {
-	if counselorID == nil {
-		return "Not Assigned"
-	}
-
-	var name string
-	query := "SELECT name FROM counselor WHERE id = $1"
-	err := s.db.QueryRowContext(ctx, query, *counselorID).Scan(&name)
-	if err != nil {
-		log.Printf("Error fetching counselor name for ID %d: %v", *counselorID, err)
-		return "Unknown"
-	}
-	return name
-}
-
-// Validation functions
-
-func validateLead(lead *models.Lead) error {
-	if err := utils.ValidateName(lead.Name); err != nil {
-		return err
-	}
-
-	if err := utils.ValidateEmail(lead.Email); err != nil {
-		return err
-	}
-
-	if err := utils.ValidatePhone(lead.Phone); err != nil {
-		return err
-	}
-
-	if err := utils.ValidateEducation(lead.Education); err != nil {
-		return err
-	}
-
-	// if err := utils.ValidateLeadSource(lead.LeadSource); err != nil {
-	// 	return err
-	// }
-
-	return nil
-}
-
-// Helper functions
-
-// Response types and helpers
-
+// GetLeadsResponse represents the API response for retrieving leads
 type GetLeadsResponse struct {
 	Status  string                `json:"status"`
 	Message string                `json:"message"`
@@ -471,6 +335,7 @@ type GetLeadsResponse struct {
 	Data    []models.LeadResponse `json:"data"`
 }
 
+// CreateLeadResponse represents the API response for creating a lead
 type CreateLeadResponse struct {
 	Message       string `json:"message"`
 	StudentID     int64  `json:"student_id"`
@@ -478,24 +343,28 @@ type CreateLeadResponse struct {
 	Email         string `json:"email"`
 }
 
-// Helper functions (wrappers around response package for backwards compatibility)
-// These maintain the existing call pattern while delegating to the centralized response package
+// HTTP helper functions
 
+// respondJSON sends a JSON response with the given status code
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	resp.SendJSON(w, status, data)
 }
 
+// respondError sends an error response with the given status code
 func respondError(w http.ResponseWriter, message string, status int) {
 	resp.ErrorResponse(w, status, message)
 }
 
-// Public handler wrappers (for backward compatibility with existing routes)
+// Public handler wrappers for backward compatibility with existing routes
+
 var service *LeadService
 
+// InitHandlers initializes the lead service with database connection
 func InitHandlers(database *sql.DB) {
 	service = NewLeadService(database)
 }
 
+// UploadLeads is the public handler for uploading leads via Excel
 func UploadLeads(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)
@@ -503,6 +372,7 @@ func UploadLeads(w http.ResponseWriter, r *http.Request) {
 	service.UploadLeads(w, r)
 }
 
+// GetLeads is the public handler for retrieving leads
 func GetLeads(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)
@@ -510,6 +380,7 @@ func GetLeads(w http.ResponseWriter, r *http.Request) {
 	service.GetLeads(w, r)
 }
 
+// CreateLead is the public handler for creating a single lead
 func CreateLead(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)
