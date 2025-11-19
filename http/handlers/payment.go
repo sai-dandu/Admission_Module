@@ -61,7 +61,12 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	// Save payment record
 	if err := paymentService.SavePaymentRecord(req.StudentID, orderResp.OrderID, *preparedReq); err != nil {
 		log.Printf("[PAYMENT] Payment record save error - StudentID: %d, OrderID: %s, Error: %v", req.StudentID, orderResp.OrderID, err)
-		resp.ErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Error saving payment record: %v", err))
+		// Check for client errors (already completed payments)
+		if err.Error() == "registration payment already completed" || err.Error() == "course payment already completed" {
+			resp.ErrorResponse(w, http.StatusBadRequest, err.Error())
+		} else {
+			resp.ErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Error saving payment record: %v", err))
+		}
 		return
 	}
 

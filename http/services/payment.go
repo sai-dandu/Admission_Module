@@ -131,10 +131,7 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 		studentID, orderID, req.Amount, req.PaymentType)
 
 	if req.PaymentType == PaymentTypeRegistration {
-		// Save to registration_payment table
-		log.Printf("[PAYMENT] Inserting into registration_payment table - StudentID: %d", studentID)
-
-		// Check if registration payment already exists
+		//check if registration payment already exists
 		var existingPaymentID int
 		var existingStatus string
 		err = tx.QueryRow("SELECT id, status FROM registration_payment WHERE student_id = $1", studentID).Scan(&existingPaymentID, &existingStatus)
