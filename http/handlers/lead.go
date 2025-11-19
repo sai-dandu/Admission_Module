@@ -3,7 +3,7 @@ package handlers
 import (
 	"admission-module/db"
 	resp "admission-module/http/response"
-	"admission-module/http/services"
+	"admission-module/services"
 	"admission-module/models"
 	"admission-module/utils"
 	"context"
