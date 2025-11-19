@@ -4,7 +4,7 @@ import (
 	"admission-module/config"
 	"admission-module/db"
 	"admission-module/http"
-	"admission-module/http/services"
+	"admission-module/services"
 	"admission-module/logger"
 	"log"
 	netHttp "net/http"

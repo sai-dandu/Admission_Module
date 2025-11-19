@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"admission-module/db"
-	"admission-module/http/services"
+	"admission-module/services"
 	"encoding/json"
 	"fmt"
 	"log"

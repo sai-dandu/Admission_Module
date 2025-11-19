@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"admission-module/http/response"
-	"admission-module/http/services"
+	"admission-module/services"
 	"encoding/json"
 	"log"
 	"net/http"
