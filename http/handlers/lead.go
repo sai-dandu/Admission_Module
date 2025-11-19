@@ -191,7 +191,7 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT 
 			id, name, email, phone, education, lead_source, 
-			counselor_id, registration_fee_status, course_fee_status, meet_link, 
+			counselor_id, meet_link, 
 			application_status, registration_payment_id, selected_course_id, 
 			course_payment_id, interview_scheduled_at, created_at, updated_at 
 		FROM student_lead 
