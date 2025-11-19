@@ -183,10 +183,12 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 	log.Printf("Lead created successfully: ID=%d, Email=%s, Counselor=%v",
 		leadID, lead.Email, lead.CounsellorID)
 
-	// Send welcome email asynchronously (non-blocking)
-	if err := services.SendWelcomeEmailWithCounselorInfo(ctx, lead); err != nil {
-		log.Printf("Warning: failed to send welcome email: %v", err)
-		// Don't fail the operation if email fails
+	// Publish lead creation event to Kafka for asynchronous email handling
+	// This is non-blocking and returns immediately
+	// Background worker will consume this event and send emails
+	if err := services.PublishLeadCreatedEvent(lead); err != nil {
+		log.Printf("Warning: failed to publish lead creation event to Kafka: %v", err)
+		// Don't fail the request - lead was created successfully
 	}
 
 	return nil

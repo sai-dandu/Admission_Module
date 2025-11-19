@@ -55,7 +55,7 @@ func InitProducer() {
 		RequiredAcks: kafka.RequireAll,
 	}
 
-	logger.Info("Kafka producer initialized. Brokers=%v, Topic=%s", validBrokers, config.AppConfig.KafkaTopic)
+	logger.Info("Kafka producer initialized. Brokers=%v", validBrokers)
 	isConnected = true
 }
 
