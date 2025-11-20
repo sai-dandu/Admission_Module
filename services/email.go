@@ -13,7 +13,6 @@ import (
 
 // data from env
 func SendEmail(to, subject, body string, attachment ...string) error {
-	log.Printf("Attempting to send email to: %s, subject: %s", to, subject)
 
 	m := gomail.NewMessage()
 
