@@ -8,7 +8,7 @@ import (
 	"log"
 )
 
-// SendWelcomeEmailWithCounselorInfo sends welcome email to student with counselor details
+
 // This function retrieves counselor information and sends both student welcome and counselor notification emails
 func SendWelcomeEmailWithCounselorInfo(ctx context.Context, lead *models.Lead) error {
 	if lead.CounsellorID == nil {
