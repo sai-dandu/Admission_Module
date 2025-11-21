@@ -21,7 +21,7 @@ func GetCourses(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT id, name, description, fee, duration, is_active, created_at, updated_at
 		FROM course
-		WHERE is_active = true
+		WHERE is_active = 1
 		ORDER BY id ASC`
 
 	rows, err := db.DB.QueryContext(r.Context(), query)
@@ -159,7 +159,7 @@ func UpdateCourse(w http.ResponseWriter, r *http.Request) {
 		Description string  `json:"description"`
 		Fee         float64 `json:"fee"`
 		Duration    string  `json:"duration"`
-		IsActive    int     `json:"is_active"` // 0 = inactive, 1 = active
+		IsActive    bool    `json:"is_active"` // false = inactive, true = active
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -177,7 +177,11 @@ func UpdateCourse(w http.ResponseWriter, r *http.Request) {
 		SET name = $1, description = $2, fee = $3, duration = $4, is_active = $5, updated_at = $6
 		WHERE id = $7`
 
-	result, err := db.DB.ExecContext(r.Context(), query, req.Name, req.Description, req.Fee, req.Duration, req.IsActive, time.Now(), req.ID)
+	isActiveInt := 0
+	if req.IsActive {
+		isActiveInt = 1
+	}
+	result, err := db.DB.ExecContext(r.Context(), query, req.Name, req.Description, req.Fee, req.Duration, isActiveInt, time.Now(), req.ID)
 	if err != nil {
 		log.Printf("Error updating course: %v", err)
 		respondError(w, "Error updating course", http.StatusInternalServerError)
