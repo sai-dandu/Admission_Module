@@ -50,6 +50,21 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if course fee payment - student must have completed registration payment first
+	if req.PaymentType == services.PaymentTypCourseFee {
+		registrationPaid, err := paymentService.CheckRegistrationPaymentStatus(req.StudentID)
+		if err != nil {
+			log.Printf("Error checking registration payment status: %v", err)
+			resp.ErrorResponse(w, http.StatusInternalServerError, "Error verifying payment eligibility")
+			return
+		}
+		if !registrationPaid {
+			log.Printf("Course fee payment attempted without completing registration payment - StudentID: %d", req.StudentID)
+			resp.ErrorResponse(w, http.StatusBadRequest, "Registration fee must be paid before course fee payment")
+			return
+		}
+	}
+
 	// Create Razorpay order
 	orderResp, err := paymentService.CreateRazorpayOrder(*preparedReq)
 	if err != nil {

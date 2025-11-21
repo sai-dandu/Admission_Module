@@ -351,7 +351,6 @@ func (s *PaymentService) VerifyPayment(req VerifyPaymentRequest) (*VerifyPayment
 		log.Printf("[PAYMENT] Student_lead updated - Rows affected: %d, Meet scheduled automatically", rows)
 	}
 
-
 	if err = tx.Commit(); err != nil {
 		log.Printf("[PAYMENT] Error committing transaction: %v", err)
 		return nil, fmt.Errorf("error committing transaction")
@@ -394,4 +393,24 @@ func (s *PaymentService) PublishPaymentVerifiedEvent(studentID int, orderID, pay
 // IsRegistrationPayment checks if payment type is registration
 func (s *PaymentService) IsRegistrationPayment(paymentType string) bool {
 	return paymentType == PaymentTypeRegistration
+}
+
+// CheckRegistrationPaymentStatus checks if a student has completed registration payment
+func (s *PaymentService) CheckRegistrationPaymentStatus(studentID int) (bool, error) {
+	var status string
+	err := db.DB.QueryRow(
+		"SELECT status FROM registration_payment WHERE student_id = $1",
+		studentID,
+	).Scan(&status)
+
+	if err != nil {
+		// If no record found, payment is not completed
+		if err.Error() == "sql: no rows in result set" {
+			return false, nil
+		}
+		return false, fmt.Errorf("error checking registration payment status: %w", err)
+	}
+
+	// Return true only if status is PAID
+	return status == "PAID", nil
 }

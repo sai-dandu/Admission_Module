@@ -20,9 +20,23 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if registration payment is completed
+	paymentService := services.NewPaymentService()
+	registrationPaid, err := paymentService.CheckRegistrationPaymentStatus(req.StudentID)
+	if err != nil {
+		log.Printf("Error checking registration payment status for student %d: %v", req.StudentID, err)
+		http.Error(w, "Error verifying payment status", http.StatusInternalServerError)
+		return
+	}
+	if !registrationPaid {
+		log.Printf("Interview scheduling attempted without completing registration payment - StudentID: %d", req.StudentID)
+		http.Error(w, "Interview can only be scheduled after completing registration payment", http.StatusBadRequest)
+		return
+	}
+
 	// Get student email
 	var email string
-	err := db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", req.StudentID).Scan(&email)
+	err = db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", req.StudentID).Scan(&email)
 	if err != nil {
 		http.Error(w, "Student not found", http.StatusNotFound)
 		return
