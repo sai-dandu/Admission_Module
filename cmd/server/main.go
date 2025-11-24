@@ -4,8 +4,8 @@ import (
 	"admission-module/config"
 	"admission-module/db"
 	"admission-module/http"
-	"admission-module/services"
 	"admission-module/logger"
+	"admission-module/services"
 	"log"
 	netHttp "net/http"
 	"os"
@@ -38,6 +38,15 @@ func main() {
 	// Initialize Kafka producer (non-fatal)
 	services.InitProducer()
 
+	// Initialize and start Kafka consumer (non-fatal)
+	// Consumer listens to events published by this service
+	consumerTopics := []string{"payments", "applications", "emails"}
+	if err := services.InitConsumer(consumerTopics); err != nil {
+		logger.Warn("Failed to initialize Kafka consumer: %v", err)
+	} else {
+		services.StartConsumer()
+	}
+
 	// Initialize database
 	if err := db.InitDB(); err != nil {
 		logger.Fatal("Error initializing database: %v", err)
@@ -58,7 +67,12 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
-	logger.Info("Shutdown signal received, closing Kafka producer...")
+	logger.Info("Shutdown signal received, closing Kafka producer and consumer...")
+
+	// Stop consumer gracefully
+	if err := services.StopConsumer(); err != nil {
+		logger.Error("Error stopping Kafka consumer: %v", err)
+	}
 
 	// Close Kafka producer gracefully
 	if err := services.Close(); err != nil {
