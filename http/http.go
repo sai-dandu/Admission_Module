@@ -3,6 +3,7 @@ package http
 import (
 	"admission-module/http/handlers"
 	"admission-module/http/middleware"
+	"admission-module/services"
 	"log"
 	"net/http"
 	"os"
@@ -48,6 +49,10 @@ func SetupRoutes() {
 	// Payment APIs
 	http.HandleFunc("/initiate-payment", middleware.EnableCORS(handlers.InitiatePayment))
 	http.HandleFunc("/verify-payment", middleware.EnableCORS(handlers.VerifyPayment))
+
+	// Razorpay Webhook - No CORS needed for webhook (server-to-server)
+	// This endpoint receives real-time payment updates from Razorpay
+	http.HandleFunc("/razorpay/webhook", services.RazorpayWebhookHandler)
 
 	// Interview & Application APIs
 	http.HandleFunc("/schedule-meet", middleware.EnableCORS(handlers.ScheduleMeet))

@@ -139,6 +139,29 @@ func createTables() error {
 			UNIQUE(student_id, course_id)
 	);`
 
+	// Razorpay webhook logs table
+	webhookLogsTable := `
+	CREATE TABLE IF NOT EXISTS razorpay_webhook_logs (
+		id BIGSERIAL PRIMARY KEY,
+		webhook_id VARCHAR(255) UNIQUE NOT NULL,
+		event_type VARCHAR(100) NOT NULL,
+		order_id VARCHAR(255),
+		payment_id VARCHAR(255),
+		refund_id VARCHAR(255),
+		student_id INTEGER,
+		amount_paise BIGINT,
+		currency VARCHAR(10),
+		status VARCHAR(50),
+		payload JSONB NOT NULL,
+		signature VARCHAR(255),
+		signature_valid BOOLEAN,
+		processing_status VARCHAR(50) DEFAULT 'PENDING',
+		processed_at TIMESTAMP,
+		error_message TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+
 	// Create counselor table first (referenced by student_lead)
 	if _, err := DB.Exec(counselorTable); err != nil {
 		return fmt.Errorf("error creating counselor table: %w", err)
@@ -162,6 +185,11 @@ func createTables() error {
 	// Create course_payment table
 	if _, err := DB.Exec(coursePaymentTable); err != nil {
 		return fmt.Errorf("error creating course_payment table: %w", err)
+	}
+
+	// Create webhook logs table
+	if _, err := DB.Exec(webhookLogsTable); err != nil {
+		return fmt.Errorf("error creating razorpay_webhook_logs table: %w", err)
 	}
 
 	// Apply schema migrations
@@ -194,6 +222,12 @@ func applyMigrations() error {
 		`CREATE INDEX IF NOT EXISTS idx_registration_payment_order_id ON registration_payment(order_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_course_payment_student_id ON course_payment(student_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_course_payment_order_id ON course_payment(order_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_event_type ON razorpay_webhook_logs(event_type);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_order_id ON razorpay_webhook_logs(order_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_payment_id ON razorpay_webhook_logs(payment_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_student_id ON razorpay_webhook_logs(student_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_processing_status ON razorpay_webhook_logs(processing_status);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_created_at ON razorpay_webhook_logs(created_at DESC);`,
 	}
 
 	for _, query := range indexQueries {

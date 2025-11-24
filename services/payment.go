@@ -3,7 +3,6 @@ package services
 import (
 	"admission-module/db"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -15,7 +14,7 @@ const RegistrationFee = 1870.0
 // PaymentType constants
 const (
 	PaymentTypeRegistration = "REGISTRATION"
-	PaymentTypCourseFee     = "COURSE_FEE"
+	PaymentTypeCourseFee    = "COURSE_FEE"
 )
 
 // PaymentService handles payment operations
@@ -50,7 +49,7 @@ func (s *PaymentService) ValidateAndPreparePayment(req InitiatePaymentRequest) (
 			req.Amount = RegistrationFee
 		}
 
-	case PaymentTypCourseFee:
+	case PaymentTypeCourseFee:
 		// For course fee, course ID is required
 		if req.CourseID == nil || *req.CourseID == 0 {
 			return nil, fmt.Errorf("course ID required for course fee payment")
@@ -127,9 +126,6 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 	}
 	defer tx.Rollback()
 
-	log.Printf("[PAYMENT] Saving payment record - StudentID: %d, OrderID: %s, Amount: %.2f, Type: %s",
-		studentID, orderID, req.Amount, req.PaymentType)
-
 	if req.PaymentType == PaymentTypeRegistration {
 		//check if registration payment already exists
 		var existingPaymentID int
@@ -138,16 +134,13 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 		if err == nil {
 			// Payment already exists - if PENDING, update with new order_id; if PAID, reject
 			if existingStatus == "PAID" {
-				log.Printf("[PAYMENT] Registration payment already paid - StudentID: %d, PaymentID: %d", studentID, existingPaymentID)
 				tx.Rollback()
 				return fmt.Errorf("registration payment already completed")
 			}
 			// Update existing PENDING payment with new order_id
-			log.Printf("[PAYMENT] Updating existing PENDING registration payment - StudentID: %d, PaymentID: %d", studentID, existingPaymentID)
 			_, err = tx.Exec("UPDATE registration_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3",
 				orderID, req.Amount, studentID)
 			if err != nil {
-				log.Printf("[PAYMENT] Error updating registration payment: %v", err)
 				return fmt.Errorf("error updating registration payment: %w", err)
 			}
 		} else {
@@ -156,25 +149,18 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 				"INSERT INTO registration_payment (student_id, amount, status, order_id) VALUES ($1, $2, $3, $4)",
 				studentID, req.Amount, "PENDING", orderID)
 			if err != nil {
-				log.Printf("[PAYMENT] Error saving registration payment: %v", err)
 				return fmt.Errorf("error saving registration payment: %w", err)
 			}
 		}
-		log.Printf("[PAYMENT] Registration payment record saved successfully")
 
 		// Update student_lead registration_fee_status
-		log.Printf("[PAYMENT] Updating student_lead registration_fee_status to PENDING - StudentID: %d", studentID)
 		_, err = tx.Exec("UPDATE student_lead SET registration_fee_status = 'PENDING' WHERE id = $1", studentID)
 		if err != nil {
-			log.Printf("[PAYMENT] Error updating registration_fee_status: %v", err)
 			return fmt.Errorf("error updating registration fee status: %w", err)
 		}
-		log.Printf("[PAYMENT] Registration fee status updated to PENDING")
 
-	} else if req.PaymentType == PaymentTypCourseFee {
+	} else if req.PaymentType == PaymentTypeCourseFee {
 		// Save to course_payment table
-		log.Printf("[PAYMENT] Inserting into course_payment table - StudentID: %d, CourseID: %d", studentID, *req.CourseID)
-
 		// Check if course payment already exists for this student+course
 		var existingPaymentID int
 		var existingStatus string
@@ -182,16 +168,13 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 		if err == nil {
 			// Payment already exists - if PENDING, update with new order_id; if PAID, reject
 			if existingStatus == "PAID" {
-				log.Printf("[PAYMENT] Course payment already paid - StudentID: %d, CourseID: %d, PaymentID: %d", studentID, *req.CourseID, existingPaymentID)
 				tx.Rollback()
 				return fmt.Errorf("course payment already completed")
 			}
 			// Update existing PENDING payment with new order_id
-			log.Printf("[PAYMENT] Updating existing PENDING course payment - StudentID: %d, CourseID: %d, PaymentID: %d", studentID, *req.CourseID, existingPaymentID)
 			_, err = tx.Exec("UPDATE course_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3 AND course_id = $4",
 				orderID, req.Amount, studentID, *req.CourseID)
 			if err != nil {
-				log.Printf("[PAYMENT] Error updating course payment: %v", err)
 				return fmt.Errorf("error updating course payment: %w", err)
 			}
 		} else {
@@ -200,34 +183,22 @@ func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req In
 				"INSERT INTO course_payment (student_id, course_id, amount, status, order_id) VALUES ($1, $2, $3, $4, $5)",
 				studentID, *req.CourseID, req.Amount, "PENDING", orderID)
 			if err != nil {
-				log.Printf("[PAYMENT] Error saving course payment: %v", err)
 				return fmt.Errorf("error saving course payment: %w", err)
 			}
 		}
-		log.Printf("[PAYMENT] Course payment record saved successfully")
 
 		// Update student_lead course_fee_status (only if column exists)
-		log.Printf("[PAYMENT] Updating student_lead course_fee_status to PENDING - StudentID: %d", studentID)
 		_, err = tx.Exec("UPDATE student_lead SET course_fee_status = 'PENDING' WHERE id = $1", studentID)
 		if err != nil {
 			// If column doesn't exist, try without it
-			log.Printf("[PAYMENT] Error updating course_fee_status: %v (column may not exist yet)", err)
 			// Don't fail - the migration might not have run yet
-		} else {
-			log.Printf("[PAYMENT] Course fee status updated to PENDING")
 		}
 	}
 
 	// Commit transaction
-	log.Printf("[PAYMENT] Committing SavePaymentRecord transaction...")
 	if err = tx.Commit(); err != nil {
-		log.Printf("[PAYMENT] Error committing SavePaymentRecord transaction: %v", err)
 		return fmt.Errorf("error committing transaction")
 	}
-	log.Printf("[PAYMENT] SavePaymentRecord transaction committed successfully")
-
-	log.Printf("Payment record saved - Student: %d, Order: %s, Type: %s, Amount: %.2f",
-		studentID, orderID, req.PaymentType, req.Amount)
 
 	return nil
 }
@@ -246,7 +217,7 @@ func (s *PaymentService) PublishPaymentInitiatedEvent(studentID int, orderID str
 			"ts":           time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := Publish("payments", fmt.Sprintf("student-%d", studentID), evt); err != nil {
-			log.Printf("Warning: failed to publish payment.initiated event: %v", err)
+			// Silently fail - event publishing is non-critical
 		}
 	}()
 }
@@ -267,102 +238,40 @@ type VerifyPaymentResult struct {
 	CourseID    *int
 }
 
-// VerifyPayment verifies and updates payment status
+// VerifyPayment verifies payment signature WITHOUT updating database
+// Database is updated ONLY when webhook arrives from Razorpay (payment.captured event)
 func (s *PaymentService) VerifyPayment(req VerifyPaymentRequest) (*VerifyPaymentResult, error) {
-	tx, err := db.DB.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("error starting transaction")
-	}
-	defer tx.Rollback()
-
 	var studentID int
 	var paymentType string
 	var amount float64
 	var courseID *int
+	var email string
 
 	// Try registration_payment table first
-	log.Printf("[PAYMENT] Looking up payment - OrderID: %s", req.OrderID)
-	var regPaymentID int
-	err = tx.QueryRow("SELECT id, student_id, amount FROM registration_payment WHERE order_id = $1", req.OrderID).Scan(&regPaymentID, &studentID, &amount)
+	err := db.DB.QueryRow("SELECT student_id, amount FROM registration_payment WHERE order_id = $1", req.OrderID).Scan(&studentID, &amount)
 
 	if err != nil {
 		// If not found in registration_payment, check course_payment
-		log.Printf("[PAYMENT] Not found in registration_payment, checking course_payment table - Error: %v", err)
-		paymentType = PaymentTypCourseFee
-		var coursePaymentID int
-		err = tx.QueryRow(
-			"SELECT id, student_id, course_id, amount FROM course_payment WHERE order_id = $1",
+		paymentType = PaymentTypeCourseFee
+		err = db.DB.QueryRow(
+			"SELECT student_id, course_id, amount FROM course_payment WHERE order_id = $1",
 			req.OrderID,
-		).Scan(&coursePaymentID, &studentID, &courseID, &amount)
+		).Scan(&studentID, &courseID, &amount)
 
 		if err != nil {
-			log.Printf("[PAYMENT] Payment lookup failed - OrderID: %s, Error: %v", req.OrderID, err)
 			return nil, fmt.Errorf("payment not found for order_id: %s", req.OrderID)
 		}
-		log.Printf("[PAYMENT] Course payment found - StudentID: %d, CourseID: %v, Amount: %.2f", studentID, courseID, amount)
-
-		// Update course_payment status
-		log.Printf("[PAYMENT] Updating course_payment status to PAID - OrderID: %s", req.OrderID)
-		_, err = tx.Exec(
-			"UPDATE course_payment SET status = $1, payment_id = $2, razorpay_sign = $3, updated_at = CURRENT_TIMESTAMP WHERE order_id = $4",
-			"PAID", req.PaymentID, req.RazorpaySign, req.OrderID)
-		if err != nil {
-			log.Printf("[PAYMENT] Error updating course_payment status: %v", err)
-			return nil, fmt.Errorf("error updating course payment: %w", err)
-		}
-
-		// Update student_lead with selected course
-		log.Printf("[PAYMENT] Updating student_lead for course payment - StudentID: %d, CourseID: %v", studentID, courseID)
-		result, err := tx.Exec(
-			"UPDATE student_lead SET course_fee_status = $1, selected_course_id = $2, course_payment_id = $3 WHERE id = $4",
-			"PAID", courseID, coursePaymentID, studentID)
-		if err != nil {
-			log.Printf("[PAYMENT] Error updating student_lead: %v", err)
-			return nil, fmt.Errorf("error updating lead: %w", err)
-		}
-		rows, _ := result.RowsAffected()
-		log.Printf("[PAYMENT] Student_lead updated - Rows affected: %d", rows)
 
 	} else {
 		// Found in registration_payment
 		paymentType = PaymentTypeRegistration
-		log.Printf("[PAYMENT] Registration payment found - StudentID: %d, Amount: %.2f", studentID, amount)
-
-		// Update registration_payment status
-		log.Printf("[PAYMENT] Updating registration_payment status to PAID - OrderID: %s", req.OrderID)
-		_, err = tx.Exec(
-			"UPDATE registration_payment SET status = $1, payment_id = $2, razorpay_sign = $3, updated_at = CURRENT_TIMESTAMP WHERE order_id = $4",
-			"PAID", req.PaymentID, req.RazorpaySign, req.OrderID)
-		if err != nil {
-			log.Printf("[PAYMENT] Error updating registration_payment status: %v", err)
-			return nil, fmt.Errorf("error updating registration payment: %w", err)
-		}
-
-		// Update student_lead with registration payment ID and schedule meet
-		log.Printf("[PAYMENT] Updating student_lead for registration payment - StudentID: %d, PaymentID: %d", studentID, regPaymentID)
-		result, err := tx.Exec(
-			"UPDATE student_lead SET registration_fee_status = $1, registration_payment_id = $2, interview_scheduled_at = CURRENT_TIMESTAMP + INTERVAL '1 hour', application_status = $3 WHERE id = $4",
-			"PAID", regPaymentID, "INTERVIEW_SCHEDULED", studentID)
-		if err != nil {
-			log.Printf("[PAYMENT] Error updating student_lead: %v", err)
-			return nil, fmt.Errorf("error updating lead: %w", err)
-		}
-		rows, _ := result.RowsAffected()
-		log.Printf("[PAYMENT] Student_lead updated - Rows affected: %d, Meet scheduled automatically", rows)
 	}
-
-
-	if err = tx.Commit(); err != nil {
-		log.Printf("[PAYMENT] Error committing transaction: %v", err)
-		return nil, fmt.Errorf("error committing transaction")
-	}
-	log.Printf("[PAYMENT] Transaction committed successfully - StudentID: %d", studentID)
 
 	// Get student email
-	var email string
-	db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", studentID).Scan(&email)
-
-	log.Printf("Payment verified - Student: %d, Order: %s, Type: %s, Amount: %.2f", studentID, req.OrderID, paymentType, amount)
+	err = db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", studentID).Scan(&email)
+	if err != nil {
+		// Email retrieval is optional
+	}
 
 	return &VerifyPaymentResult{
 		StudentID:   studentID,
@@ -386,7 +295,7 @@ func (s *PaymentService) PublishPaymentVerifiedEvent(studentID int, orderID, pay
 			"ts":           time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := Publish("payments", fmt.Sprintf("student-%d", studentID), evt); err != nil {
-			log.Printf("Warning: failed to publish payment.verified event: %v", err)
+			// Silently fail - event publishing is non-critical
 		}
 	}()
 }
