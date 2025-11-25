@@ -104,6 +104,9 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
+		refund_id VARCHAR(255),
+		refund_amount NUMERIC(10, 2),
+		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -124,6 +127,9 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
+		refund_id VARCHAR(255),
+		refund_amount NUMERIC(10, 2),
+		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -162,6 +168,22 @@ func createTables() error {
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`
 
+	// Razorpay webhooks table
+	razorpayWebhooksTable := `
+	CREATE TABLE IF NOT EXISTS razorpay_webhooks (
+		id SERIAL PRIMARY KEY,
+		webhook_id VARCHAR(255) UNIQUE NOT NULL,
+		event_type VARCHAR(100) NOT NULL,
+		payload JSONB NOT NULL,
+		status VARCHAR(50) DEFAULT 'RECEIVED',
+		processed_at TIMESTAMP,
+		error_message TEXT,
+		retry_count INTEGER DEFAULT 0,
+		signature_valid BOOLEAN DEFAULT false,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+
 	// Create counselor table first (referenced by student_lead)
 	if _, err := DB.Exec(counselorTable); err != nil {
 		return fmt.Errorf("error creating counselor table: %w", err)
@@ -171,7 +193,6 @@ func createTables() error {
 	if _, err := DB.Exec(courseTable); err != nil {
 		return fmt.Errorf("error creating course table: %w", err)
 	}
-
 	// Create student_lead table
 	if _, err := DB.Exec(leadTable); err != nil {
 		return fmt.Errorf("error creating student_lead table: %w", err)
@@ -192,10 +213,16 @@ func createTables() error {
 		return fmt.Errorf("error creating razorpay_webhook_logs table: %w", err)
 	}
 
+	// Create razorpay_webhooks table - with UNIQUE constraint on webhook_id
+	if _, err := DB.Exec(razorpayWebhooksTable); err != nil {
+		return fmt.Errorf("error creating razorpay_webhooks table: %w", err)
+	}
+
 	// Apply schema migrations
 	if err := applyMigrations(); err != nil {
 		log.Printf("Warning: Error applying migrations: %v", err)
 	}
+	log.Println("[DB] ✓ Migrations applied")
 
 	// Insert default dummy data if empty
 	if err := insertDefaultData(); err != nil {
@@ -213,6 +240,12 @@ func applyMigrations() error {
 	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS registration_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
 	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS course_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
 
+	// Add refund tracking columns to payment tables
+	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
+	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
+	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
+	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
+
 	// Create performance indexes
 	indexQueries := []string{
 		`CREATE INDEX IF NOT EXISTS idx_student_lead_registration_fee_status ON student_lead(registration_fee_status);`,
@@ -228,6 +261,10 @@ func applyMigrations() error {
 		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_student_id ON razorpay_webhook_logs(student_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_processing_status ON razorpay_webhook_logs(processing_status);`,
 		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_created_at ON razorpay_webhook_logs(created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_event_type ON razorpay_webhooks(event_type);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_status ON razorpay_webhooks(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_webhook_id ON razorpay_webhooks(webhook_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_created_at ON razorpay_webhooks(created_at DESC);`,
 	}
 
 	for _, query := range indexQueries {

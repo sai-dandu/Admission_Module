@@ -9,6 +9,7 @@ import (
 )
 
 // InitiatePaymentHandler handles payment initiation requests
+// This handler supports both registration and course fee payments
 func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -22,8 +23,15 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 		CourseID    *int    `json:"course_id,omitempty"`
 	}
 
+	// Parse request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format")
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format: "+err.Error())
+		return
+	}
+
+	// Validate student ID
+	if req.StudentID <= 0 {
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid student ID - must be greater than 0")
 		return
 	}
 
@@ -32,7 +40,25 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 		req.PaymentType = services.PaymentTypeRegistration
 	}
 
+	// Validate payment type
+	if req.PaymentType != services.PaymentTypeRegistration && req.PaymentType != services.PaymentTypeCourseFee {
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid payment type - must be REGISTRATION or COURSE_FEE")
+		return
+	}
+
 	paymentService := services.NewPaymentService()
+
+	// Check payment eligibility
+	canPay, reason, err := paymentService.CheckPaymentEligibility(req.StudentID, req.PaymentType, req.CourseID)
+	if err != nil {
+		log.Printf("Error checking payment eligibility: %v", err)
+		resp.ErrorResponse(w, http.StatusBadRequest, reason)
+		return
+	}
+	if !canPay {
+		resp.ErrorResponse(w, http.StatusBadRequest, reason)
+		return
+	}
 
 	// Validate and prepare payment
 	preparedReq, err := paymentService.ValidateAndPreparePayment(services.InitiatePaymentRequest{
@@ -42,6 +68,7 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 		CourseID:    req.CourseID,
 	})
 	if err != nil {
+		log.Printf("Payment validation error: %v", err)
 		resp.ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -50,14 +77,16 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	orderResp, err := paymentService.CreateRazorpayOrder(*preparedReq)
 	if err != nil {
 		log.Printf("Razorpay order creation error: %v", err)
-		resp.ErrorResponse(w, http.StatusInternalServerError, "Error creating payment order")
+		resp.ErrorResponse(w, http.StatusInternalServerError, "Error creating payment order: "+err.Error())
 		return
 	}
 
 	// Save payment record
 	if err := paymentService.SavePaymentRecord(req.StudentID, orderResp.OrderID, *preparedReq); err != nil {
-		// Check for client errors (already completed payments)
-		if err.Error() == "registration payment already completed" || err.Error() == "course payment already completed" {
+		log.Printf("Error saving payment record: %v", err)
+		// Determine if this is a client error or server error
+		if err.Error() == "registration payment already completed - student has already paid registration fee" ||
+			err.Error() == "course payment already completed - student has already paid fee for course" {
 			resp.ErrorResponse(w, http.StatusBadRequest, err.Error())
 		} else {
 			resp.ErrorResponse(w, http.StatusInternalServerError, err.Error())
@@ -68,10 +97,21 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	// Publish event asynchronously
 	paymentService.PublishPaymentInitiatedEvent(req.StudentID, orderResp.OrderID, *preparedReq)
 
-	resp.SuccessResponse(w, http.StatusOK, "Payment order created", orderResp)
+	// Return success response with order details
+	resp.SuccessResponse(w, http.StatusOK, "Payment order created successfully", map[string]interface{}{
+		"order_id":     orderResp.OrderID,
+		"amount":       orderResp.Amount,
+		"currency":     orderResp.Currency,
+		"receipt":      orderResp.Receipt,
+		"payment_type": req.PaymentType,
+		"student_id":   req.StudentID,
+		"message":      "Please complete the payment using Razorpay",
+	})
 }
 
 // VerifyPaymentHandler handles payment verification requests
+// This is a client-side verification endpoint that checks signature
+// The actual database update happens via Razorpay webhook
 func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -84,8 +124,9 @@ func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
 		RazorpaySign string `json:"razorpay_signature"`
 	}
 
+	// Parse request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format")
+		resp.ErrorResponse(w, http.StatusBadRequest, "Invalid request format: "+err.Error())
 		return
 	}
 
@@ -107,29 +148,57 @@ func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Verify payment signature (this is client-side verification only)
 	// The actual database update will happen when the webhook arrives from Razorpay
-	result, err := paymentService.VerifyPayment(services.VerifyPaymentRequest{
+	_, err := paymentService.VerifyPayment(services.VerifyPaymentRequest{
 		OrderID:      req.OrderID,
 		PaymentID:    req.PaymentID,
 		RazorpaySign: req.RazorpaySign,
 	})
 	if err != nil {
+		log.Printf("Error verifying payment: %v", err)
 		resp.ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	// NOTE: DO NOT update database here, DO NOT publish event here
 	// The webhook (payment.captured) from Razorpay will:
-	// 1. Verify signature again
+	// 1. Verify signature again (server-side verification)
 	// 2. Update database status to PAID
 	// 3. Publish payment.verified event to Kafka
 	// 4. Schedule interview (if registration payment)
 
 	// Return success response (status still PENDING until webhook confirms)
-	resp.SuccessResponse(w, http.StatusOK, "Payment signature verified. Waiting for Razorpay webhook confirmation.", map[string]interface{}{
-		"status":     "PENDING",
-		"student_id": result.StudentID,
-		"order_id":   req.OrderID,
-		"message":    "Database will be updated when Razorpay webhook arrives",
+	resp.SuccessResponse(w, http.StatusOK, "Payment verified successfully", map[string]interface{}{
+		"status": "success",
+	})
+}
+
+// GetPaymentStatusHandler returns the current payment status for an order
+func GetPaymentStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	orderID := r.URL.Query().Get("order_id")
+	if orderID == "" {
+		resp.ErrorResponse(w, http.StatusBadRequest, "order_id query parameter is required")
+		return
+	}
+
+	paymentService := services.NewPaymentService()
+
+	status, paymentType, studentID, err := paymentService.GetPaymentStatus(orderID)
+	if err != nil {
+		log.Printf("Error getting payment status: %v", err)
+		resp.ErrorResponse(w, http.StatusNotFound, "Payment not found for order_id: "+orderID)
+		return
+	}
+
+	resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", map[string]interface{}{
+		"order_id":     orderID,
+		"status":       status,
+		"payment_type": paymentType,
+		"student_id":   studentID,
 	})
 }
 
@@ -140,4 +209,8 @@ func InitiatePayment(w http.ResponseWriter, r *http.Request) {
 
 func VerifyPayment(w http.ResponseWriter, r *http.Request) {
 	VerifyPaymentHandler(w, r)
+}
+
+func GetPaymentStatus(w http.ResponseWriter, r *http.Request) {
+	GetPaymentStatusHandler(w, r)
 }

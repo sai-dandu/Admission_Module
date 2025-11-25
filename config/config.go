@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -39,16 +38,10 @@ func LoadConfig() {
 		"../../config/.env", // two levels up
 	}
 
-	envLoaded := false
 	for _, location := range envLocations {
 		if err := godotenv.Load(location); err == nil {
-			envLoaded = true
 			break
 		}
-	}
-
-	if !envLoaded {
-		log.Println("No .env file found, using environment variables")
 	}
 
 	AppConfig = Config{

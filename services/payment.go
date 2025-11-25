@@ -2,7 +2,9 @@ package services
 
 import (
 	"admission-module/db"
+	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -15,6 +17,14 @@ const RegistrationFee = 1870.0
 const (
 	PaymentTypeRegistration = "REGISTRATION"
 	PaymentTypeCourseFee    = "COURSE_FEE"
+)
+
+// Payment Status constants
+const (
+	PaymentStatusPending   = "PENDING"
+	PaymentStatusPaid      = "PAID"
+	PaymentStatusFailed    = "FAILED"
+	PaymentStatusCancelled = "CANCELLED"
 )
 
 // PaymentService handles payment operations
@@ -122,82 +132,116 @@ func (s *PaymentService) CreateRazorpayOrder(req InitiatePaymentRequest) (*Initi
 func (s *PaymentService) SavePaymentRecord(studentID int, orderID string, req InitiatePaymentRequest) error {
 	tx, err := db.DB.Begin()
 	if err != nil {
-		return fmt.Errorf("error starting transaction")
+		return fmt.Errorf("error starting transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	if req.PaymentType == PaymentTypeRegistration {
-		//check if registration payment already exists
+		// Check if registration payment already exists
 		var existingPaymentID int
 		var existingStatus string
 		err = tx.QueryRow("SELECT id, status FROM registration_payment WHERE student_id = $1", studentID).Scan(&existingPaymentID, &existingStatus)
+
 		if err == nil {
-			// Payment already exists - if PENDING, update with new order_id; if PAID, reject
-			if existingStatus == "PAID" {
+			// Payment already exists
+			if existingStatus == PaymentStatusPaid {
 				tx.Rollback()
-				return fmt.Errorf("registration payment already completed")
+				return fmt.Errorf("registration payment already completed - student has already paid registration fee")
 			}
-			// Update existing PENDING payment with new order_id
-			_, err = tx.Exec("UPDATE registration_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3",
-				orderID, req.Amount, studentID)
-			if err != nil {
-				return fmt.Errorf("error updating registration payment: %w", err)
+			if existingStatus == PaymentStatusFailed || existingStatus == PaymentStatusCancelled {
+				// Can retry failed/cancelled payment
+				_, err = tx.Exec(
+					"UPDATE registration_payment SET order_id = $1, amount = $2, status = $3, payment_id = NULL, razorpay_sign = NULL, updated_at = CURRENT_TIMESTAMP WHERE student_id = $4",
+					orderID, req.Amount, PaymentStatusPending, studentID)
+				if err != nil {
+					return fmt.Errorf("error updating failed registration payment: %w", err)
+				}
+			} else if existingStatus == PaymentStatusPending {
+				// Update existing PENDING payment with new order_id (retry)
+				_, err = tx.Exec(
+					"UPDATE registration_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3",
+					orderID, req.Amount, studentID)
+				if err != nil {
+					return fmt.Errorf("error updating pending registration payment: %w", err)
+				}
 			}
-		} else {
+		} else if err == sql.ErrNoRows {
 			// No existing payment, insert new one
 			_, err = tx.Exec(
 				"INSERT INTO registration_payment (student_id, amount, status, order_id) VALUES ($1, $2, $3, $4)",
-				studentID, req.Amount, "PENDING", orderID)
+				studentID, req.Amount, PaymentStatusPending, orderID)
 			if err != nil {
 				return fmt.Errorf("error saving registration payment: %w", err)
 			}
+		} else {
+			return fmt.Errorf("error checking existing registration payment: %w", err)
 		}
 
 		// Update student_lead registration_fee_status
-		_, err = tx.Exec("UPDATE student_lead SET registration_fee_status = 'PENDING' WHERE id = $1", studentID)
+		_, err = tx.Exec("UPDATE student_lead SET registration_fee_status = $1 WHERE id = $2", PaymentStatusPending, studentID)
 		if err != nil {
 			return fmt.Errorf("error updating registration fee status: %w", err)
 		}
 
 	} else if req.PaymentType == PaymentTypeCourseFee {
 		// Save to course_payment table
+		if req.CourseID == nil || *req.CourseID == 0 {
+			return fmt.Errorf("course ID is required for course fee payment")
+		}
+
 		// Check if course payment already exists for this student+course
 		var existingPaymentID int
 		var existingStatus string
 		err = tx.QueryRow("SELECT id, status FROM course_payment WHERE student_id = $1 AND course_id = $2", studentID, *req.CourseID).Scan(&existingPaymentID, &existingStatus)
+
 		if err == nil {
-			// Payment already exists - if PENDING, update with new order_id; if PAID, reject
-			if existingStatus == "PAID" {
+			// Payment already exists
+			if existingStatus == PaymentStatusPaid {
 				tx.Rollback()
-				return fmt.Errorf("course payment already completed")
+				return fmt.Errorf("course payment already completed - student has already paid fee for course %d", *req.CourseID)
 			}
-			// Update existing PENDING payment with new order_id
-			_, err = tx.Exec("UPDATE course_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3 AND course_id = $4",
-				orderID, req.Amount, studentID, *req.CourseID)
-			if err != nil {
-				return fmt.Errorf("error updating course payment: %w", err)
+			if existingStatus == PaymentStatusFailed || existingStatus == PaymentStatusCancelled {
+				// Can retry failed/cancelled payment
+				_, err = tx.Exec(
+					"UPDATE course_payment SET order_id = $1, amount = $2, status = $3, payment_id = NULL, razorpay_sign = NULL, updated_at = CURRENT_TIMESTAMP WHERE student_id = $4 AND course_id = $5",
+					orderID, req.Amount, PaymentStatusPending, studentID, *req.CourseID)
+				if err != nil {
+					return fmt.Errorf("error updating failed course payment: %w", err)
+				}
+			} else if existingStatus == PaymentStatusPending {
+				// Update existing PENDING payment with new order_id (retry)
+				_, err = tx.Exec(
+					"UPDATE course_payment SET order_id = $1, amount = $2, updated_at = CURRENT_TIMESTAMP WHERE student_id = $3 AND course_id = $4",
+					orderID, req.Amount, studentID, *req.CourseID)
+				if err != nil {
+					return fmt.Errorf("error updating pending course payment: %w", err)
+				}
 			}
-		} else {
+		} else if err == sql.ErrNoRows {
 			// No existing payment, insert new one
 			_, err = tx.Exec(
 				"INSERT INTO course_payment (student_id, course_id, amount, status, order_id) VALUES ($1, $2, $3, $4, $5)",
-				studentID, *req.CourseID, req.Amount, "PENDING", orderID)
+				studentID, *req.CourseID, req.Amount, PaymentStatusPending, orderID)
 			if err != nil {
 				return fmt.Errorf("error saving course payment: %w", err)
 			}
+		} else {
+			return fmt.Errorf("error checking existing course payment: %w", err)
 		}
 
-		// Update student_lead course_fee_status (only if column exists)
-		_, err = tx.Exec("UPDATE student_lead SET course_fee_status = 'PENDING' WHERE id = $1", studentID)
+		// Update student_lead course_fee_status
+		_, err = tx.Exec("UPDATE student_lead SET course_fee_status = $1 WHERE id = $2", PaymentStatusPending, studentID)
 		if err != nil {
-			// If column doesn't exist, try without it
-			// Don't fail - the migration might not have run yet
+			// Not critical - continue
+			log.Printf("Warning: error updating course fee status: %v", err)
 		}
+	} else {
+		return fmt.Errorf("invalid payment type: %s", req.PaymentType)
 	}
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("error committing transaction")
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return nil
@@ -291,11 +335,12 @@ func (s *PaymentService) PublishPaymentVerifiedEvent(studentID int, orderID, pay
 			"order_id":     orderID,
 			"payment_id":   paymentID,
 			"payment_type": paymentType,
+			"source":       "webhook",
 			"status":       "PAID",
 			"ts":           time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := Publish("payments", fmt.Sprintf("student-%d", studentID), evt); err != nil {
-			// Silently fail - event publishing is non-critical
+			log.Printf("Warning: failed to publish payment.verified event: %v", err)
 		}
 	}()
 }
@@ -303,4 +348,82 @@ func (s *PaymentService) PublishPaymentVerifiedEvent(studentID int, orderID, pay
 // IsRegistrationPayment checks if payment type is registration
 func (s *PaymentService) IsRegistrationPayment(paymentType string) bool {
 	return paymentType == PaymentTypeRegistration
+}
+
+// GetPaymentStatus retrieves the current payment status for a given order ID
+func (s *PaymentService) GetPaymentStatus(orderID string) (status string, paymentType string, studentID int, err error) {
+	// Try registration_payment first
+	err = db.DB.QueryRow("SELECT status, student_id FROM registration_payment WHERE order_id = $1", orderID).Scan(&status, &studentID)
+	if err == nil {
+		return status, PaymentTypeRegistration, studentID, nil
+	}
+
+	// Try course_payment
+	err = db.DB.QueryRow("SELECT status, student_id FROM course_payment WHERE order_id = $1", orderID).Scan(&status, &studentID)
+	if err == nil {
+		return status, PaymentTypeCourseFee, studentID, nil
+	}
+
+	return "", "", 0, fmt.Errorf("payment not found for order_id: %s", orderID)
+}
+
+// ValidateStudentExists checks if student exists and returns student details
+func (s *PaymentService) ValidateStudentExists(studentID int) (name, email string, err error) {
+	err = db.DB.QueryRow("SELECT name, email FROM student_lead WHERE id = $1", studentID).Scan(&name, &email)
+	if err != nil {
+		return "", "", fmt.Errorf("student not found with id: %d", studentID)
+	}
+	return name, email, nil
+}
+
+// CheckPaymentEligibility checks if student can make a payment
+func (s *PaymentService) CheckPaymentEligibility(studentID int, paymentType string, courseID *int) (canPay bool, reason string, err error) {
+	// Check if student exists
+	var exists bool
+	err = db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM student_lead WHERE id = $1)", studentID).Scan(&exists)
+	if err != nil || !exists {
+		return false, "Student not found", err
+	}
+
+	if paymentType == PaymentTypeRegistration {
+		// Check if registration payment already paid
+		var status string
+		err = db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", studentID).Scan(&status)
+		if err == nil {
+			if status == PaymentStatusPaid {
+				return false, "Registration payment already completed", nil
+			}
+			// PENDING or FAILED - can retry
+			return true, "", nil
+		}
+		// No payment yet - can proceed
+		return true, "", nil
+
+	} else if paymentType == PaymentTypeCourseFee {
+		// Check if course exists
+		if courseID == nil || *courseID == 0 {
+			return false, "Course ID is required for course fee payment", nil
+		}
+
+		var courseExists bool
+		err = db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM course WHERE id = $1)", *courseID).Scan(&courseExists)
+		if err != nil || !courseExists {
+			return false, "Course not found", err
+		}
+
+		// Check if course payment already paid
+		var status string
+		err = db.DB.QueryRow("SELECT status FROM course_payment WHERE student_id = $1 AND course_id = $2", studentID, *courseID).Scan(&status)
+		if err == nil {
+			if status == PaymentStatusPaid {
+				return false, fmt.Sprintf("Course payment already completed for course %d", *courseID), nil
+			}
+			// PENDING or FAILED - can retry
+			return true, "", nil
+		}
+		// No payment yet - can proceed
+		return true, "", nil
+	}
+
+	return false, "Invalid payment type", fmt.Errorf("invalid payment type: %s", paymentType)
 }

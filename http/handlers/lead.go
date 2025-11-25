@@ -18,7 +18,6 @@ import (
 )
 
 // LeadService handles all lead-related operations
-
 type LeadService struct {
 	db *sql.DB
 }
