@@ -104,6 +104,9 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
+		refund_id VARCHAR(255),
+		refund_amount NUMERIC(10, 2),
+		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -124,6 +127,9 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
+		refund_id VARCHAR(255),
+		refund_amount NUMERIC(10, 2),
+		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -139,6 +145,45 @@ func createTables() error {
 			UNIQUE(student_id, course_id)
 	);`
 
+	// Razorpay webhook logs table
+	webhookLogsTable := `
+	CREATE TABLE IF NOT EXISTS razorpay_webhook_logs (
+		id BIGSERIAL PRIMARY KEY,
+		webhook_id VARCHAR(255) UNIQUE NOT NULL,
+		event_type VARCHAR(100) NOT NULL,
+		order_id VARCHAR(255),
+		payment_id VARCHAR(255),
+		refund_id VARCHAR(255),
+		student_id INTEGER,
+		amount_paise BIGINT,
+		currency VARCHAR(10),
+		status VARCHAR(50),
+		payload JSONB NOT NULL,
+		signature VARCHAR(255),
+		signature_valid BOOLEAN,
+		processing_status VARCHAR(50) DEFAULT 'PENDING',
+		processed_at TIMESTAMP,
+		error_message TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	// Razorpay webhooks table
+	razorpayWebhooksTable := `
+	CREATE TABLE IF NOT EXISTS razorpay_webhooks (
+		id SERIAL PRIMARY KEY,
+		webhook_id VARCHAR(255) UNIQUE NOT NULL,
+		event_type VARCHAR(100) NOT NULL,
+		payload JSONB NOT NULL,
+		status VARCHAR(50) DEFAULT 'RECEIVED',
+		processed_at TIMESTAMP,
+		error_message TEXT,
+		retry_count INTEGER DEFAULT 0,
+		signature_valid BOOLEAN DEFAULT false,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+
 	// Create counselor table first (referenced by student_lead)
 	if _, err := DB.Exec(counselorTable); err != nil {
 		return fmt.Errorf("error creating counselor table: %w", err)
@@ -148,7 +193,6 @@ func createTables() error {
 	if _, err := DB.Exec(courseTable); err != nil {
 		return fmt.Errorf("error creating course table: %w", err)
 	}
-
 	// Create student_lead table
 	if _, err := DB.Exec(leadTable); err != nil {
 		return fmt.Errorf("error creating student_lead table: %w", err)
@@ -190,6 +234,7 @@ func createTables() error {
 	if err := applyMigrations(); err != nil {
 		log.Printf("Warning: Error applying migrations: %v", err)
 	}
+	log.Println("[DB] ✓ Migrations applied")
 
 	// Insert default dummy data if empty
 	if err := insertDefaultData(); err != nil {
@@ -206,6 +251,12 @@ func applyMigrations() error {
 	// Add new payment status columns if they don't exist
 	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS registration_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
 	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS course_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
+
+	// Add refund tracking columns to payment tables
+	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
+	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
+	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
+	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
 
 	// Create performance indexes
 	indexQueries := []string{

@@ -55,6 +55,9 @@ func InitProducer() {
 		return
 	}
 
+	// Attempt to create required topics
+	ensureTopicsExist(validBrokers)
+
 	producer = &kafka.Writer{
 		Addr:     kafka.TCP(validBrokers...),
 		Balancer: &kafka.LeastBytes{},
@@ -65,8 +68,71 @@ func InitProducer() {
 		RequiredAcks: kafka.RequireAll,
 	}
 
-	logger.Info("Kafka producer initialized. Brokers=%v, Topic=%s", validBrokers, config.AppConfig.KafkaTopic)
+	logger.Info("✓ Kafka producer initialized. Brokers=%v, Topic=%s", validBrokers, config.AppConfig.KafkaTopic)
 	isConnected = true
+}
+
+// ensureTopicsExist creates Kafka topics if they don't already exist
+// This runs in a background goroutine to avoid blocking initialization
+func ensureTopicsExist(brokers []string) {
+	go func() {
+		// Retry logic for topic creation with exponential backoff
+		maxRetries := 5
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			// Give brokers time to stabilize
+			waitTime := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			if attempt > 0 {
+				time.Sleep(waitTime)
+			} else {
+				time.Sleep(1 * time.Second) // Initial wait
+			}
+
+			conn, err := kafka.Dial("tcp", brokers[0])
+			if err != nil {
+				if attempt == maxRetries-1 {
+					logger.Warn("Could not connect to Kafka broker for topic creation after %d attempts: %v (Kafka topics may need manual creation)", maxRetries, err)
+				}
+				continue
+			}
+
+			requiredTopics := []string{"payments", "applications", "emails", "interviews"}
+			successCount := 0
+
+			for _, topic := range requiredTopics {
+				// Try to create it - if it exists, CreateTopics will return an error which we ignore
+				err := conn.CreateTopics(kafka.TopicConfig{
+					Topic:             topic,
+					NumPartitions:     1,
+					ReplicationFactor: 1,
+				})
+
+				if err != nil {
+					// Check if it's "topic already exists" error - that's OK
+					if strings.Contains(err.Error(), "already exists") {
+						logger.Info("✓ Kafka topic '%s' already exists", topic)
+						successCount++
+					}
+				} else {
+					logger.Info("✓ Created Kafka topic '%s'", topic)
+					successCount++
+				}
+			}
+
+			conn.Close()
+
+			// If we created or found all topics, we're done
+			if successCount >= len(requiredTopics) {
+				logger.Info("✓ All required Kafka topics are available")
+				return
+			}
+
+			// Otherwise retry
+			if attempt < maxRetries-1 {
+				continue
+			}
+		}
+
+	}()
 }
 
 // Publish marshals value to JSON and publishes to the given topic with key

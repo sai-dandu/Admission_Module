@@ -30,9 +30,6 @@ func main() {
 	if err := os.Chdir(absProjectRoot); err != nil {
 		log.Fatal("Error changing to project root:", err)
 	}
-	logger.Info("Working directory set to project root: %s", absProjectRoot)
-
-	// Load configuration
 	config.LoadConfig()
 
 	// Initialize Kafka producer (non-fatal)
@@ -42,7 +39,6 @@ func main() {
 	services.InitDLQProducer()
 
 	// Initialize and start Kafka consumer (non-fatal)
-	// Consumer listens to events published by this service
 	consumerTopics := []string{"payments", "applications", "emails"}
 	if err := services.InitConsumer(consumerTopics); err != nil {
 		logger.Warn("Failed to initialize Kafka consumer: %v", err)
@@ -69,13 +65,11 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		logger.Info("Server starting on :8080")
 		log.Fatal(netHttp.ListenAndServe(":8080", nil))
 	}()
 
 	// Wait for shutdown signal
 	<-sigChan
-	logger.Info("Shutdown signal received, closing Kafka producer and consumer...")
 
 	// Stop DLQ auto-retry
 	services.StopDLQAutoRetry()
@@ -89,8 +83,6 @@ func main() {
 	if err := services.Close(); err != nil {
 		logger.Error("Error closing Kafka producer: %v", err)
 	}
-
-	logger.Info("Server shutdown complete")
 }
 
 // findProjectRoot walks up from start and returns the first directory containing go.mod

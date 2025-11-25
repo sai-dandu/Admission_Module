@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -14,8 +13,9 @@ type Config struct {
 	DBPassword string
 	DBName     string
 
-	RazorpayKeyID     string
-	RazorpayKeySecret string
+	RazorpayKeyID         string
+	RazorpayKeySecret     string
+	RazorpayWebhookSecret string
 
 	SMTPHost  string
 	SMTPPort  string
@@ -39,16 +39,10 @@ func LoadConfig() {
 		"../../config/.env", // two levels up
 	}
 
-	envLoaded := false
 	for _, location := range envLocations {
 		if err := godotenv.Load(location); err == nil {
-			envLoaded = true
 			break
 		}
-	}
-
-	if !envLoaded {
-		log.Println("No .env file found, using environment variables")
 	}
 
 	AppConfig = Config{
@@ -58,8 +52,9 @@ func LoadConfig() {
 		DBPassword: getEnvWithDefault("DB_PASSWORD", "Sai@6303179072$"),
 		DBName:     getEnvWithDefault("DB_NAME", "postgres"),
 
-		RazorpayKeyID:     os.Getenv("RazorpayKeyID"),
-		RazorpayKeySecret: os.Getenv("RazorpayKeySecret"),
+		RazorpayKeyID:         os.Getenv("RazorpayKeyID"),
+		RazorpayKeySecret:     os.Getenv("RazorpayKeySecret"),
+		RazorpayWebhookSecret: os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
 
 		SMTPHost:  getEnvWithDefault("SMTP_HOST", "smtp.gmail.com"),
 		SMTPPort:  getEnvWithDefault("SMTP_PORT", "587"),
