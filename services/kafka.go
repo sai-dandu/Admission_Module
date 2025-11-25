@@ -1,15 +1,17 @@
 package services
 
 import (
+	"admission-module/config"
+	"admission-module/db"
+	"admission-module/logger"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
 	"time"
-
-	"admission-module/config"
-	"admission-module/logger"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -22,6 +24,10 @@ var (
 	consumerMutex   sync.Mutex
 	consumerRunning bool
 	stopConsumer    chan bool
+	dlqProducer     *kafka.Writer
+	dlqMutex        sync.Mutex
+	dlqRetryTicker  *time.Ticker
+	stopDLQRetry    chan bool
 )
 
 // InitProducer initializes a Kafka writer using brokers from the config
@@ -118,6 +124,12 @@ func Publish(topic, key string, value interface{}) error {
 		isConnected = false
 	}
 
+	// Send to DLQ if all retries failed
+	logger.Info("📤 Sending failed message to DLQ. Topic: %s, Key: %s", topic, key)
+	if dlqErr := SendToDLQ(topic, key, payload, lastErr.Error()); dlqErr != nil {
+		logger.Error("Failed to send message to DLQ: %v", dlqErr)
+	}
+
 	return lastErr
 }
 
@@ -126,6 +138,417 @@ func IsConnected() bool {
 	producerMutex.Lock()
 	defer producerMutex.Unlock()
 	return isConnected && producer != nil
+}
+
+// ============================================================================
+// DLQ PRODUCER - Send failed messages to Dead Letter Queue
+// ============================================================================
+
+// InitDLQProducer initializes a Kafka writer for the DLQ topic
+func InitDLQProducer() {
+	dlqMutex.Lock()
+	defer dlqMutex.Unlock()
+
+	if config.AppConfig.KafkaBrokers == "" {
+		logger.Info("Kafka DLQ is disabled (KAFKA_BROKERS is empty)")
+		return
+	}
+
+	brokers := strings.Split(config.AppConfig.KafkaBrokers, ",")
+
+	// Validate brokers
+	var validBrokers []string
+	for _, b := range brokers {
+		if b := strings.TrimSpace(b); b != "" {
+			validBrokers = append(validBrokers, b)
+		}
+	}
+
+	if len(validBrokers) == 0 {
+		logger.Warn("No valid Kafka brokers configured for DLQ")
+		return
+	}
+
+	dlqProducer = &kafka.Writer{
+		Addr:         kafka.TCP(validBrokers...),
+		Topic:        config.AppConfig.KafkaDLQTopic,
+		Balancer:     &kafka.LeastBytes{},
+		Async:        false,
+		WriteTimeout: 10 * time.Second,
+		RequiredAcks: kafka.RequireAll,
+	}
+
+	logger.Info("Kafka DLQ producer initialized. Brokers=%v, DLQ Topic=%s", validBrokers, config.AppConfig.KafkaDLQTopic)
+}
+
+// SendToDLQ publishes a failed message to the Dead Letter Queue
+// Stores both in Kafka and in database for later retrieval
+func SendToDLQ(topic, key string, value []byte, errorMsg string) error {
+	dlqMutex.Lock()
+	if dlqProducer == nil && config.AppConfig.KafkaBrokers != "" {
+		dlqMutex.Unlock()
+		InitDLQProducer()
+		dlqMutex.Lock()
+	}
+	defer dlqMutex.Unlock()
+
+	if dlqProducer == nil || config.AppConfig.KafkaBrokers == "" {
+		logger.Warn("DLQ producer not initialized, storing failed message in database only")
+	} else {
+		// Create DLQ message envelope
+		dlqMessage := map[string]interface{}{
+			"original_topic": topic,
+			"original_key":   key,
+			"original_value": string(value),
+			"error_message":  errorMsg,
+			"timestamp":      time.Now().Unix(),
+			"failure_reason": "Processing failed",
+		}
+
+		dlqPayload, err := json.Marshal(dlqMessage)
+		if err != nil {
+			logger.Error("Error marshaling DLQ message: %v", err)
+			return err
+		}
+
+		msg := kafka.Message{
+			Key:   []byte(key),
+			Value: dlqPayload,
+		}
+
+		// Send to DLQ with retries
+		for attempt := 0; attempt < 3; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := dlqProducer.WriteMessages(ctx, msg)
+			cancel()
+
+			if err == nil {
+				logger.Info("✅ Message sent to DLQ topic: %s", config.AppConfig.KafkaDLQTopic)
+				break
+			}
+
+			if attempt < 2 {
+				logger.Warn("DLQ publish attempt %d/3 failed, retrying: %v", attempt+1, err)
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+			} else {
+				logger.Error("Failed to send to DLQ after 3 attempts: %v", err)
+			}
+		}
+	}
+
+	// Always store in database for persistence
+	return StoreDLQMessage(topic, key, value, errorMsg)
+}
+
+// StoreDLQMessage stores a failed message in the database
+func StoreDLQMessage(topic, key string, value []byte, errorMsg string) error {
+	// Get database connection from your db package
+	// This is a placeholder - adjust based on your actual db setup
+	db := getDBConnection()
+	if db == nil {
+		logger.Warn("Database connection not available for DLQ storage")
+		return nil
+	}
+
+	query := `
+		INSERT INTO dlq_messages (message_id, topic, key, value, error_message, created_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
+		ON CONFLICT (message_id) DO NOTHING
+	`
+
+	_, err := db.Exec(query, topic, key, string(value), errorMsg)
+	if err != nil {
+		logger.Error("Error storing DLQ message in database: %v", err)
+		return err
+	}
+
+	logger.Info("✅ DLQ message stored in database. Topic: %s, Key: %s", topic, key)
+	return nil
+}
+
+// GetDLQMessages retrieves unresolved DLQ messages from database
+func GetDLQMessages(limit int) ([]map[string]interface{}, error) {
+	db := getDBConnection()
+	if db == nil {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, message_id, topic, key, value, error_message, retry_count, created_at
+		FROM dlq_messages
+		WHERE resolved = FALSE
+		ORDER BY created_at DESC
+		LIMIT $1
+	`
+
+	rows, err := db.Query(query, limit)
+	if err != nil {
+		logger.Error("Error querying DLQ messages: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var messageID, topic, key string
+		var value, errorMsg string
+		var retryCount int
+		var createdAt time.Time
+
+		if err := rows.Scan(&id, &messageID, &topic, &key, &value, &errorMsg, &retryCount, &createdAt); err != nil {
+			logger.Error("Error scanning DLQ message: %v", err)
+			continue
+		}
+
+		messages = append(messages, map[string]interface{}{
+			"id":            id,
+			"message_id":    messageID,
+			"topic":         topic,
+			"key":           key,
+			"value":         value,
+			"error_message": errorMsg,
+			"retry_count":   retryCount,
+			"created_at":    createdAt,
+		})
+	}
+
+	return messages, nil
+}
+
+// RetryDLQMessage attempts to reprocess a DLQ message
+func RetryDLQMessage(messageID string) error {
+	db := getDBConnection()
+	if db == nil {
+		return nil
+	}
+
+	query := `
+		SELECT value, topic, key FROM dlq_messages WHERE message_id = $1
+	`
+
+	var value, topic, key string
+	err := db.QueryRow(query, messageID).Scan(&value, &topic, &key)
+	if err != nil {
+		logger.Error("Error retrieving DLQ message for retry: %v", err)
+		return err
+	}
+
+	// Attempt to reprocess
+	var eventData map[string]interface{}
+	if err := json.Unmarshal([]byte(value), &eventData); err != nil {
+		logger.Error("Error unmarshaling DLQ message for retry: %v", err)
+		return err
+	}
+
+	// Reprocess the message and check if successful
+	wasSuccessful := handleKafkaMessageForRetry(kafka.Message{
+		Topic: topic,
+		Key:   []byte(key),
+		Value: []byte(value),
+	})
+
+	// Update retry count and resolve only if successful
+	var updateQuery string
+	if wasSuccessful {
+		updateQuery = `
+			UPDATE dlq_messages
+			SET retry_count = retry_count + 1, last_retry_at = NOW(), resolved = TRUE, resolved_at = NOW(), notes = 'Manually retried successfully'
+			WHERE message_id = $1
+		`
+		logger.Info("✅ DLQ message %s marked as resolved (manual retry successful)", messageID)
+	} else {
+		updateQuery = `
+			UPDATE dlq_messages
+			SET retry_count = retry_count + 1, last_retry_at = NOW()
+			WHERE message_id = $1
+		`
+		logger.Info("ℹ️ DLQ message %s retry count incremented (retry failed, sent back to DLQ)", messageID)
+	}
+	_, err = db.Exec(updateQuery, messageID)
+	return err
+}
+
+// ResolveDLQMessage marks a DLQ message as resolved
+func ResolveDLQMessage(messageID string, notes string) error {
+	db := getDBConnection()
+	if db == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE dlq_messages
+		SET resolved = TRUE, resolved_at = NOW(), notes = $2
+		WHERE message_id = $1
+	`
+
+	_, err := db.Exec(query, messageID, notes)
+	if err != nil {
+		logger.Error("Error resolving DLQ message: %v", err)
+		return err
+	}
+
+	logger.Info("✅ DLQ message %s marked as resolved", messageID)
+	return nil
+}
+
+// GetDLQStats retrieves statistics about DLQ messages
+func GetDLQStats() (map[string]interface{}, error) {
+	db := getDBConnection()
+	if db == nil {
+		return nil, nil
+	}
+
+	var totalMessages, unresolvedMessages, resolvedMessages int
+
+	// Get total DLQ messages
+	err := db.QueryRow("SELECT COUNT(*) FROM dlq_messages").Scan(&totalMessages)
+	if err != nil {
+		logger.Error("Error getting total DLQ messages count: %v", err)
+		return nil, err
+	}
+
+	// Get unresolved DLQ messages
+	err = db.QueryRow("SELECT COUNT(*) FROM dlq_messages WHERE resolved = FALSE").Scan(&unresolvedMessages)
+	if err != nil {
+		logger.Error("Error getting unresolved DLQ messages count: %v", err)
+		return nil, err
+	}
+
+	// Get resolved DLQ messages
+	err = db.QueryRow("SELECT COUNT(*) FROM dlq_messages WHERE resolved = TRUE").Scan(&resolvedMessages)
+	if err != nil {
+		logger.Error("Error getting resolved DLQ messages count: %v", err)
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"total_dlq_messages":  totalMessages,
+		"unresolved_messages": unresolvedMessages,
+		"resolved_messages":   resolvedMessages,
+	}, nil
+}
+
+// StartDLQAutoRetry starts a background goroutine that automatically retries failed DLQ messages
+// Retries unresolved messages every 10 seconds for testing (change to 5*time.Minute in production)
+func StartDLQAutoRetry() {
+	dlqRetryTicker = time.NewTicker(10 * time.Second)
+	stopDLQRetry = make(chan bool)
+
+	go func() {
+		logger.Info("🔄 DLQ auto-retry goroutine started")
+		for {
+			select {
+			case <-dlqRetryTicker.C:
+				retryUnresolvedDLQMessages()
+			case <-stopDLQRetry:
+				logger.Info("DLQ auto-retry stopped")
+				return
+			}
+		}
+	}()
+
+	logger.Info("✅ DLQ auto-retry scheduler initialized (checks every 10 seconds)")
+}
+
+// retryUnresolvedDLQMessages retrieves unresolved messages and attempts to retry them
+func retryUnresolvedDLQMessages() {
+	db := getDBConnection()
+	if db == nil {
+		logger.Warn("Database connection not available for DLQ auto-retry")
+		return
+	}
+
+	logger.Info("🔄 DLQ auto-retry cycle started...")
+
+	query := `
+		SELECT message_id, value, topic, key, retry_count, max_retries
+		FROM dlq_messages
+		WHERE resolved = FALSE AND retry_count < max_retries
+		ORDER BY created_at ASC
+		LIMIT 10
+	`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		logger.Error("Error querying unresolved DLQ messages for retry: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	retryCount := 0
+	successCount := 0
+	for rows.Next() {
+		var messageID, value, topic, key string
+		var retryAttempts, maxRetries int
+
+		if err := rows.Scan(&messageID, &value, &topic, &key, &retryAttempts, &maxRetries); err != nil {
+			logger.Error("Error scanning DLQ message for retry: %v", err)
+			continue
+		}
+
+		logger.Info("🔄 Auto-retrying DLQ message %s (attempt %d/%d)", messageID, retryAttempts+1, maxRetries)
+
+		// Attempt to reprocess the message - capture success/failure
+		// We'll treat successful reprocessing (no SendToDLQ call) as success
+		wasReprocessed := handleKafkaMessageForRetry(kafka.Message{
+			Topic: topic,
+			Key:   []byte(key),
+			Value: []byte(value),
+		})
+
+		logger.Info("🔍 Reprocessing result for message %s: success=%v", messageID, wasReprocessed)
+
+		// Update retry count and mark as resolved if successful
+		if wasReprocessed {
+			updateQuery := `
+				UPDATE dlq_messages
+				SET retry_count = retry_count + 1, last_retry_at = NOW(), resolved = TRUE, resolved_at = NOW(), notes = 'Auto-retried successfully'
+				WHERE message_id = $1
+			`
+			if _, err := db.Exec(updateQuery, messageID); err != nil {
+				logger.Error("Error updating DLQ message as resolved %s: %v", messageID, err)
+			} else {
+				logger.Info("✅ DLQ message %s marked as resolved (auto-retry)", messageID)
+				successCount++
+			}
+		} else {
+			// Still increment retry but don't mark as resolved
+			updateQuery := `
+				UPDATE dlq_messages
+				SET retry_count = retry_count + 1, last_retry_at = NOW()
+				WHERE message_id = $1
+			`
+			if _, err := db.Exec(updateQuery, messageID); err != nil {
+				logger.Error("Error updating retry count for message %s: %v", messageID, err)
+			}
+		}
+
+		retryCount++
+	}
+
+	if retryCount > 0 {
+		logger.Info("✅ DLQ auto-retry completed: processed %d messages, %d resolved", retryCount, successCount)
+	} else {
+		logger.Info("✅ DLQ auto-retry completed: no messages to retry")
+	}
+}
+
+// StopDLQAutoRetry stops the automatic DLQ retry mechanism
+func StopDLQAutoRetry() {
+	if dlqRetryTicker != nil {
+		dlqRetryTicker.Stop()
+	}
+	if stopDLQRetry != nil {
+		close(stopDLQRetry)
+	}
+	logger.Info("✅ DLQ auto-retry stopped")
+}
+
+// getDBConnection is a helper to get the database connection
+// Returns the database connection from db package
+func getDBConnection() *sql.DB {
+	return db.DB
 }
 
 // Close gracefully closes the Kafka producer and consumer
@@ -257,7 +680,15 @@ func consumeMessages() {
 
 // handleKafkaMessage processes incoming Kafka messages
 // This is where you handle different event types
+// On error, messages are sent to the DLQ
 func handleKafkaMessage(msg kafka.Message) {
+	_ = handleKafkaMessageForRetry(msg)
+}
+
+// handleKafkaMessageForRetry processes incoming Kafka messages and returns whether it was successful
+// Returns true if message was processed successfully (not sent to DLQ)
+// Returns false if message was sent to DLQ
+func handleKafkaMessageForRetry(msg kafka.Message) bool {
 	logger.Info("📨 Received message from topic: %s, partition: %d, offset: %d", msg.Topic, msg.Partition, msg.Offset)
 	logger.Info("   Key: %s, Size: %d bytes", string(msg.Key), len(msg.Value))
 
@@ -266,7 +697,9 @@ func handleKafkaMessage(msg kafka.Message) {
 	err := json.Unmarshal(msg.Value, &eventData)
 	if err != nil {
 		logger.Error("Error unmarshaling message: %v", err)
-		return
+		// Send to DLQ on unmarshal error
+		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Failed to unmarshal JSON: "+err.Error())
+		return false
 	}
 
 	logger.Info("   Event type: %v", eventData["event"])
@@ -275,24 +708,42 @@ func handleKafkaMessage(msg kafka.Message) {
 	eventType, ok := eventData["event"].(string)
 	if !ok {
 		logger.Warn("Message does not contain event type")
-		return
+		// Send to DLQ for invalid event type
+		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Message does not contain valid event type")
+		return false
 	}
 
-	// Handle different event types
+	// Handle different event types with error handling
+	var handlerErr error
 	switch eventType {
 	case "lead.created":
-		handleLeadCreated(eventData)
+		handlerErr = handleLeadCreated(eventData)
 	case "payment.initiated":
-		handlePaymentInitiated(eventData)
+		handlerErr = handlePaymentInitiated(eventData)
 	case "payment.verified":
-		handlePaymentVerified(eventData)
+		handlerErr = handlePaymentVerified(eventData)
 	case "email.sent":
-		handleEmailSent(eventData)
+		handlerErr = handleEmailSent(eventData)
 	case "application.submitted":
-		handleApplicationSubmitted(eventData)
+		handlerErr = handleApplicationSubmitted(eventData)
+	case "interview.scheduled":
+		handlerErr = handleInterviewScheduled(eventData)
 	default:
 		logger.Warn("Unknown event type: %s", eventType)
+		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Unknown event type: "+eventType)
+		return false
 	}
+
+	// If handler returned an error, send to DLQ
+	if handlerErr != nil {
+		logger.Error("Error handling event type %s: %v", eventType, handlerErr)
+		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Handler error: "+handlerErr.Error())
+		return false
+	}
+
+	// Success! Message was processed without errors
+	logger.Info("✅ Successfully processed message (event: %s, key: %s)", eventType, string(msg.Key))
+	return true
 }
 
 // ============================================================================
@@ -300,49 +751,76 @@ func handleKafkaMessage(msg kafka.Message) {
 // ============================================================================
 
 // handleLeadCreated processes lead.created events
-func handleLeadCreated(event map[string]interface{}) {
+func handleLeadCreated(event map[string]interface{}) error {
 	logger.Info("🆕 Processing lead.created event:")
 	logger.Info("   Student ID: %v", event["student_id"])
 	logger.Info("   Name: %v", event["name"])
 	logger.Info("   Email: %v", event["email"])
 	logger.Info("   Counselor: %v", event["counselor_name"])
-
+	return nil
 }
 
 // handlePaymentInitiated processes payment.initiated events
-func handlePaymentInitiated(event map[string]interface{}) {
+func handlePaymentInitiated(event map[string]interface{}) error {
 	logger.Info("💳 Processing payment.initiated event:")
 	logger.Info("   Student ID: %v", event["student_id"])
 	logger.Info("   Order ID: %v", event["order_id"])
 	logger.Info("   Amount: %v %v", event["amount"], event["currency"])
 	logger.Info("   Payment Type: %v", event["payment_type"])
-
+	return nil
 }
 
 // handlePaymentVerified processes payment.verified events
-func handlePaymentVerified(event map[string]interface{}) {
+func handlePaymentVerified(event map[string]interface{}) error {
 	logger.Info("✅ Processing payment.verified event:")
 	logger.Info("   Student ID: %v", event["student_id"])
 	logger.Info("   Payment ID: %v", event["payment_id"])
 	logger.Info("   Status: %v", event["status"])
-
+	return nil
 }
 
 // handleEmailSent processes email.sent events
-func handleEmailSent(event map[string]interface{}) {
+func handleEmailSent(event map[string]interface{}) error {
 	logger.Info("📧 Processing email.sent event:")
 	logger.Info("   Recipient: %v", event["recipient"])
 	logger.Info("   Subject: %v", event["subject"])
-
+	return nil
 }
 
 // handleApplicationSubmitted processes application events
-func handleApplicationSubmitted(event map[string]interface{}) {
+func handleApplicationSubmitted(event map[string]interface{}) error {
 	logger.Info("📝 Processing application event:")
 	logger.Info("   Student ID: %v", event["student_id"])
 	logger.Info("   Course: %v", event["course"])
 	logger.Info("   Status: %v", event["status"])
+	return nil
+}
 
+// handleInterviewScheduled processes interview.scheduled events
+func handleInterviewScheduled(event map[string]interface{}) error {
+	logger.Info("📅 Processing interview.scheduled event:")
+
+	email, ok := event["email"].(string)
+	if !ok || email == "" {
+		logger.Warn("Invalid email in interview.scheduled event")
+		return fmt.Errorf("invalid email")
+	}
+
+	meetLink, ok := event["meet_link"].(string)
+	if !ok || meetLink == "" {
+		logger.Warn("Invalid meet_link in interview.scheduled event")
+		return fmt.Errorf("invalid meet_link")
+	}
+
+	logger.Info("   Student ID: %v", event["student_id"])
+	logger.Info("   Email: %v", email)
+	logger.Info("   Meet Link: %v", meetLink)
+
+	// Send email notification using existing SendEmail function
+	subject := "Your Interview Meeting Link"
+	body := "Your interview meeting has been scheduled.\n\nMeeting Link: " + meetLink
+
+	return SendEmail(email, subject, body)
 }
 
 // StopConsumer stops the consumer gracefully
