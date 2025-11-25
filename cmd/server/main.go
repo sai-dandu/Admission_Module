@@ -35,6 +35,9 @@ func main() {
 	// Initialize Kafka producer (non-fatal)
 	services.InitProducer()
 
+	// Initialize Kafka DLQ producer (non-fatal)
+	services.InitDLQProducer()
+
 	// Initialize and start Kafka consumer (non-fatal)
 	consumerTopics := []string{"payments", "applications", "emails"}
 	if err := services.InitConsumer(consumerTopics); err != nil {
@@ -42,6 +45,11 @@ func main() {
 	} else {
 		services.StartConsumer()
 	}
+
+	// Start DLQ auto-retry mechanism
+	logger.Info("Initializing DLQ auto-retry...")
+	services.StartDLQAutoRetry()
+	logger.Info("DLQ auto-retry initialization complete")
 
 	// Initialize database
 	if err := db.InitDB(); err != nil {
@@ -62,6 +70,9 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
+
+	// Stop DLQ auto-retry
+	services.StopDLQAutoRetry()
 
 	// Stop consumer gracefully
 	if err := services.StopConsumer(); err != nil {

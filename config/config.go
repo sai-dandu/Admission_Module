@@ -23,8 +23,9 @@ type Config struct {
 	SMTPPass  string
 	EmailFrom string
 	// Kafka
-	KafkaBrokers string
-	KafkaTopic   string
+	KafkaBrokers  string
+	KafkaTopic    string
+	KafkaDLQTopic string
 }
 
 var AppConfig Config
@@ -62,8 +63,9 @@ func LoadConfig() {
 		EmailFrom: os.Getenv("EMAIL_FROM"),
 
 		// Kafka settings (comma-separated brokers)
-		KafkaBrokers: getEnvWithDefault("KAFKA_BROKERS", "127.0.0.1:9092"),
-		KafkaTopic:   getEnvWithDefault("KAFKA_TOPIC", "admissions.payments"),
+		KafkaBrokers:  getEnvWithDefault("KAFKA_BROKERS", "127.0.0.1:9092"),
+		KafkaTopic:    getEnvWithDefault("KAFKA_TOPIC", "admissions.payments"),
+		KafkaDLQTopic: getEnvWithDefault("KAFKA_DLQ_TOPIC", "admissions.payments.dlq"),
 	}
 }
 

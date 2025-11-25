@@ -208,14 +208,26 @@ func createTables() error {
 		return fmt.Errorf("error creating course_payment table: %w", err)
 	}
 
-	// Create webhook logs table
-	if _, err := DB.Exec(webhookLogsTable); err != nil {
-		return fmt.Errorf("error creating razorpay_webhook_logs table: %w", err)
-	}
+	// DLQ messages table for Dead Letter Queue
+	dlqTable := `
+	CREATE TABLE IF NOT EXISTS dlq_messages (
+		id SERIAL PRIMARY KEY,
+		message_id UUID UNIQUE,
+		topic VARCHAR(255) NOT NULL,
+		key TEXT,
+		value JSONB NOT NULL,
+		error_message TEXT,
+		retry_count INT DEFAULT 0,
+		max_retries INT DEFAULT 3,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_retry_at TIMESTAMP,
+		resolved BOOLEAN DEFAULT FALSE,
+		resolved_at TIMESTAMP,
+		notes TEXT
+	);`
 
-	// Create razorpay_webhooks table - with UNIQUE constraint on webhook_id
-	if _, err := DB.Exec(razorpayWebhooksTable); err != nil {
-		return fmt.Errorf("error creating razorpay_webhooks table: %w", err)
+	if _, err := DB.Exec(dlqTable); err != nil {
+		return fmt.Errorf("error creating dlq_messages table: %w", err)
 	}
 
 	// Apply schema migrations
@@ -255,16 +267,10 @@ func applyMigrations() error {
 		`CREATE INDEX IF NOT EXISTS idx_registration_payment_order_id ON registration_payment(order_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_course_payment_student_id ON course_payment(student_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_course_payment_order_id ON course_payment(order_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_event_type ON razorpay_webhook_logs(event_type);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_order_id ON razorpay_webhook_logs(order_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_payment_id ON razorpay_webhook_logs(payment_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_student_id ON razorpay_webhook_logs(student_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_processing_status ON razorpay_webhook_logs(processing_status);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhook_logs_created_at ON razorpay_webhook_logs(created_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_event_type ON razorpay_webhooks(event_type);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_status ON razorpay_webhooks(status);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_webhook_id ON razorpay_webhooks(webhook_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_razorpay_webhooks_created_at ON razorpay_webhooks(created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_dlq_created_at ON dlq_messages(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_dlq_resolved ON dlq_messages(resolved);`,
+		`CREATE INDEX IF NOT EXISTS idx_dlq_topic ON dlq_messages(topic);`,
+		`CREATE INDEX IF NOT EXISTS idx_dlq_unresolved ON dlq_messages(resolved) WHERE resolved = FALSE;`,
 	}
 
 	for _, query := range indexQueries {

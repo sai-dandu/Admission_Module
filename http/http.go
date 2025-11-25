@@ -55,4 +55,10 @@ func SetupRoutes() {
 	// Interview & Application APIs
 	http.HandleFunc("/schedule-meet", middleware.EnableCORS(handlers.ScheduleMeet))
 	http.HandleFunc("/application-action", middleware.EnableCORS(handlers.ApplicationAction))
+
+	// DLQ Management APIs
+	http.HandleFunc("/api/dlq/messages", middleware.EnableCORS(handlers.GetDLQMessages))
+	http.HandleFunc("/api/dlq/messages/retry/", middleware.EnableCORS(handlers.RetryDLQMessage))
+	http.HandleFunc("/api/dlq/messages/resolve/", middleware.EnableCORS(handlers.ResolveDLQMessage))
+	http.HandleFunc("/api/dlq/stats", middleware.EnableCORS(handlers.GetDLQStats))
 }
