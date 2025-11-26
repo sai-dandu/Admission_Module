@@ -3,6 +3,7 @@ package http
 import (
 	"admission-module/http/handlers"
 	"admission-module/http/middleware"
+	"admission-module/services"
 	"log"
 	"net/http"
 	"os"
@@ -12,7 +13,7 @@ import (
 
 // SetupRoutes configures all HTTP routes and middleware
 func SetupRoutes() {
-	// Serve static files with CORS and debug logging
+	// Serve static files
 	staticDir := "static"
 	absStaticDir, err := filepath.Abs(staticDir)
 	if err != nil {
@@ -23,12 +24,10 @@ func SetupRoutes() {
 		requestedFile := filepath.Join(absStaticDir, strings.TrimPrefix(r.URL.Path, "/static/"))
 
 		if _, err := os.Stat(requestedFile); os.IsNotExist(err) {
-			log.Printf("File not found: %s", requestedFile)
 			http.NotFound(w, r)
 			return
 		}
 
-		log.Printf("File found, serving: %s", requestedFile)
 		middleware.EnableCORS(func(w http.ResponseWriter, r *http.Request) {
 			http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))).ServeHTTP(w, r)
 		})(w, r)
@@ -48,8 +47,18 @@ func SetupRoutes() {
 	// Payment APIs
 	http.HandleFunc("/initiate-payment", middleware.EnableCORS(handlers.InitiatePayment))
 	http.HandleFunc("/verify-payment", middleware.EnableCORS(handlers.VerifyPayment))
+	http.HandleFunc("/payment-status", middleware.EnableCORS(handlers.GetPaymentStatus))
+
+	// Razorpay Webhook - No CORS needed for webhook (server-to-server)
+	http.HandleFunc("/razorpay/webhook", services.RazorpayWebhookHandler)
 
 	// Interview & Application APIs
 	http.HandleFunc("/schedule-meet", middleware.EnableCORS(handlers.ScheduleMeet))
 	http.HandleFunc("/application-action", middleware.EnableCORS(handlers.ApplicationAction))
+
+	// DLQ Management APIs
+	http.HandleFunc("/api/dlq/messages", middleware.EnableCORS(handlers.GetDLQMessages))
+	http.HandleFunc("/api/dlq/messages/retry/", middleware.EnableCORS(handlers.RetryDLQMessage))
+	http.HandleFunc("/api/dlq/messages/resolve/", middleware.EnableCORS(handlers.ResolveDLQMessage))
+	http.HandleFunc("/api/dlq/stats", middleware.EnableCORS(handlers.GetDLQStats))
 }

@@ -8,45 +8,31 @@ import (
 	"log"
 )
 
-
-// This function retrieves counselor information and sends both student welcome and counselor notification emails
+// SendWelcomeEmailWithCounselorInfo retrieves counselor info and queues welcome emails
 func SendWelcomeEmailWithCounselorInfo(ctx context.Context, lead *models.Lead) error {
 	if lead.CounsellorID == nil {
-		log.Printf("Warning: Lead %d has no assigned counselor, skipping email", lead.ID)
 		return nil
 	}
 
-	// Get counselor information
 	var counselorName, counselorEmail, counselorPhone string
 	query := "SELECT name, email, phone FROM counselor WHERE id = $1"
 	err := db.DB.QueryRowContext(ctx, query, *lead.CounsellorID).Scan(&counselorName, &counselorEmail, &counselorPhone)
 	if err != nil {
-		log.Printf("Error fetching counselor details: %v", err)
 		return fmt.Errorf("error fetching counselor details: %w", err)
 	}
 
-	// Send student welcome email
-	if err := SendCounselorAssignmentEmail(lead.Name, lead.Email, counselorName, counselorEmail, counselorPhone); err != nil {
-		log.Printf("Error sending welcome email to student: %v", err)
-		return err
-	}
+	go SendCounselorAssignmentEmail(lead.Name, lead.Email, counselorName, counselorEmail, counselorPhone)
+	go SendCounselorAssignmentNotificationEmail(counselorName, counselorEmail, lead.Name, lead.Phone, lead.Email, lead.LeadSource)
 
-	// Send counselor notification email
-	if err := SendCounselorAssignmentNotificationEmail(counselorName, counselorEmail, lead.Name, lead.Phone, lead.Email, lead.LeadSource); err != nil {
-		log.Printf("Error sending notification email to counselor: %v", err)
-		// Don't return error - this is non-critical
-	}
-
+	log.Printf("✅ Welcome emails queued for: %s", lead.Email)
 	return nil
 }
 
-// SendCounselorAssignmentEmail sends a welcome email to the student with counselor information
+// SendCounselorAssignmentEmail queues student welcome email via Kafka
 func SendCounselorAssignmentEmail(studentName, studentEmail, counselorName, counselorEmail, counselorPhone string) error {
 	if studentEmail == "" {
 		return fmt.Errorf("student email is required")
 	}
-
-	log.Printf("Sending welcome email to student: %s (%s) with counselor: %s", studentName, studentEmail, counselorName)
 
 	emailBody := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -154,22 +140,20 @@ func SendCounselorAssignmentEmail(studentName, studentEmail, counselorName, coun
 	`, studentName, counselorName, counselorEmail, counselorEmail, counselorPhone, counselorPhone)
 
 	subject := fmt.Sprintf("Welcome %s - Your Counselor Assignment", studentName)
-	err := SendEmail(studentEmail, subject, emailBody)
-	if err != nil {
-		log.Printf("Error sending welcome email to %s: %v", studentEmail, err)
-		return err
+
+	if err := SendEmail(studentEmail, subject, emailBody); err != nil {
+		log.Printf("Warning: Failed to queue welcome email to %s: %v", studentEmail, err)
+		return nil
 	}
-	log.Printf("Successfully sent welcome email to %s", studentEmail)
+
 	return nil
 }
 
-// SendCounselorAssignmentNotificationEmail sends a notification to the counselor about new assignment
+// SendCounselorAssignmentNotificationEmail queues counselor notification email via Kafka
 func SendCounselorAssignmentNotificationEmail(counselorName, counselorEmail, studentName, studentPhone, studentEmail, leadSource string) error {
 	if counselorEmail == "" {
 		return fmt.Errorf("counselor email is required")
 	}
-
-	log.Printf("Sending counselor notification email to: %s (%s) for student: %s", counselorName, counselorEmail, studentName)
 
 	emailBody := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -254,11 +238,11 @@ func SendCounselorAssignmentNotificationEmail(counselorName, counselorEmail, stu
 	`, counselorName, studentName, studentEmail, studentEmail, studentPhone, studentPhone, leadSource)
 
 	subject := fmt.Sprintf("New Lead Assignment - %s", studentName)
-	err := SendEmail(counselorEmail, subject, emailBody)
-	if err != nil {
-		log.Printf("Error sending counselor notification email to %s: %v", counselorEmail, err)
-		return err
+
+	if err := SendEmail(counselorEmail, subject, emailBody); err != nil {
+		log.Printf("Warning: Failed to queue counselor notification to %s: %v", counselorEmail, err)
+		return nil
 	}
-	log.Printf("Successfully sent counselor notification email to %s", counselorEmail)
+
 	return nil
 }

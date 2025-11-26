@@ -1,13 +1,15 @@
 package services
 
 import (
+	"admission-module/db"
 	"fmt"
+	"log"
 	"time"
 )
 
-// ScheduleMeet creates a meeting invite for the given email. Instead of using Google Calendar API,
-// it generates a simple meeting link and sends an email with the details.
-func ScheduleMeet(email string) (string, error) {
+// ScheduleMeet creates a meeting invite for the given email and stores meet_link in database.
+// Instead of using Google Calendar API, it generates a simple meeting link and sends an email with the details.
+func ScheduleMeet(studentID int, email string) (string, error) {
 	// Generate a unique meeting ID using timestamp
 	meetID := fmt.Sprintf("%d", time.Now().Unix())
 
@@ -40,6 +42,16 @@ func ScheduleMeet(email string) (string, error) {
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to send meeting invite: %w", err)
+	}
+
+	// Store meet_link in student_lead table
+	_, err = db.DB.Exec(
+		"UPDATE student_lead SET meet_link = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+		meetLink, studentID)
+	if err != nil {
+		log.Printf("Warning: failed to store meet_link in database: %v", err)
+	} else {
+		log.Printf("✅ meet_link stored in database: %s", meetLink)
 	}
 
 	return meetLink, nil

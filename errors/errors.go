@@ -9,7 +9,7 @@ import (
 
 // Error defines a standard application error.
 type Error struct {
-	Kind Kind `json:"kind"`
+	Kind    Kind   `json:"kind"`
 	Message string `json:"message"`
 	// Wrapped underlying error.
 	WrappedErr error `json:"wrapped_err,omitempty"`
@@ -64,7 +64,6 @@ func (k Kind) String() string {
 func (k Kind) MarshalJSON() ([]byte, error) {
 	return json.Marshal(k.String())
 }
-
 
 func E(args ...interface{}) error {
 	e := &Error{}

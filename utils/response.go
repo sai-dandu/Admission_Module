@@ -14,7 +14,6 @@ type StandardResponse struct {
 }
 
 // SendJSON writes a JSON response with the given status code
-// This is the base function used by all response helpers
 func SendJSON(w http.ResponseWriter, statusCode int, data interface{}) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -38,15 +37,4 @@ func SendError(w http.ResponseWriter, statusCode int, message string) {
 		Error:  message,
 	}
 	SendJSON(w, statusCode, response)
-}
-
-// Deprecated: Use SendSuccess instead. Response structure has changed.
-// Old function kept for reference
-func SuccessResponse(w http.ResponseWriter, message string, data interface{}) {
-	SendSuccess(w, http.StatusOK, message, data)
-}
-
-// Deprecated: Use SendError instead
-func ErrorResponse(w http.ResponseWriter, statusCode int, message string) {
-	SendError(w, statusCode, message)
 }
