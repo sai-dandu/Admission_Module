@@ -395,30 +395,36 @@ Email Delivered
 
 **Automatic Flow:**
 ```
-Registration Payment PAID
+Registration Payment Webhook
     ↓
-Razorpay Webhook Verification
+Payment marked PAID
     ↓
-scheduleInterviewAfterPayment() 
+interview_scheduled_at set to NOW + 1 hour ✅
+application_status = 'INTERVIEW_SCHEDULED' ✅
     ↓
-Publish "interview.schedule" event to Kafka
+scheduleInterviewAfterPayment() publishes event to Kafka
     ↓
-Kafka Consumer receives event
+Kafka Consumer → handleInterviewSchedule()
     ↓
-handleInterviewSchedule() extracted student info
+ScheduleMeet(studentID, email) called
     ↓
-ScheduleMeet() - Generate Google Meet link
+Generate Google Meet link
+Send email via Kafka
+Update student_lead.meet_link ✅
     ↓
-SendEmail() - Publish interview email to Kafka
-    ↓
-Email Consumer sends email with meeting link
+student_lead updated with:
+  - interview_scheduled_at: timestamp
+  - meet_link: https://meet.google.com/xxx
+  - application_status: INTERVIEW_SCHEDULED
 ```
 
 **Key Points:**
 - Interview scheduled **1 hour after** payment verification
 - Only scheduled on **first successful payment** (not retries)
 - Duplicate webhooks do NOT reschedule
-- Meeting link auto-generated and emailed
+- Meeting link auto-generated and stored in database
+- All fields updated in single transaction
+- Email sent asynchronously via Kafka
 
 ### 4. Kafka Event System
 

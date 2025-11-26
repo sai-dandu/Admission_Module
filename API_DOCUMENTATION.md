@@ -642,34 +642,51 @@ Email Delivered
 **Trigger:** Registration payment marked PAID  
 **Recipient:** Student  
 
-**Complete Flow:**
+**Complete Interview Scheduling Flow:**
+
 ```
-Registration Payment PAID (Webhook)
+Registration Payment Webhook
     ↓
-scheduleInterviewAfterPayment()
+Payment marked PAID
     ↓
-Publish "interview.schedule" to Kafka
+interview_scheduled_at set to NOW + 1 hour ✅
+application_status = 'INTERVIEW_SCHEDULED' ✅
     ↓
-Consumer receives event
+scheduleInterviewAfterPayment() publishes event to Kafka
     ↓
-handleInterviewSchedule()
+Kafka Consumer → handleInterviewSchedule()
     ↓
-ScheduleMeet() - Generate Google Meet link
+ScheduleMeet(studentID, email) called
     ↓
-SendEmail() - Publish interview email
+Generate Google Meet link
+Send email via Kafka
+Update student_lead.meet_link ✅
     ↓
-handleEmailSend()
-    ↓
-SendEmailDirect() - SMTP send
-    ↓
-Email delivered
+student_lead updated with:
+  - interview_scheduled_at: timestamp
+  - meet_link: https://meet.google.com/xxx
+  - application_status: INTERVIEW_SCHEDULED
+```
+
+**Event JSON:**
+```json
+{
+  "event": "email.send",
+  "email_type": "interview_scheduled",
+  "recipient": "john@example.com",
+  "subject": "Meeting Scheduled for Nov 26, 2025 3:53 PM",
+  "body": "Dear John Doe,\n\nYour interview has been scheduled!\n\nGoogle Meet Link: https://meet.google.com/abc-defg-hij\nDate & Time: Nov 26, 2025 3:53 PM IST\n\nPlease join 5 minutes before.",
+  "ts": "2025-11-18T10:35:00Z"
+}
 ```
 
 **Key Points:**
 - Only on **first successful payment**
 - Duplicate webhooks do NOT reschedule
-- Meeting link auto-generated
-- Email queued immediately
+- Meeting link auto-generated and stored in database
+- Interview time set immediately in webhook
+- Email queued to Kafka immediately
+- All fields (`interview_scheduled_at`, `meet_link`, `application_status`) updated in single transaction
 
 #### 4. Application Acceptance Email
 **Trigger:** Application accepted  

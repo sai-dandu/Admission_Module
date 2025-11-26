@@ -368,6 +368,22 @@ func processPaymentCaptured(orderID, paymentID, signature string) error {
 			return fmt.Errorf("error updating student registration fee status: %w", err)
 		} else {
 			log.Printf("    ✓ student_lead registration_fee_status and registration_payment_id updated")
+
+			// Set interview_scheduled_at to 1 hour from now for registration payment
+			interviewTime := time.Now().Add(time.Hour)
+			log.Printf("    Setting interview_scheduled_at to: %s", interviewTime.Format(time.RFC3339))
+			_, err = tx.Exec(
+				"UPDATE student_lead SET interview_scheduled_at = $1, application_status = 'INTERVIEW_SCHEDULED', updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+				interviewTime, studentID)
+			if err != nil {
+				log.Printf("❌ [WEBHOOK] Error updating student interview_scheduled_at: %v", err)
+				if rollbackErr := tx.Rollback(); rollbackErr != nil {
+					log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				}
+				return fmt.Errorf("error updating student interview_scheduled_at: %w", err)
+			} else {
+				log.Printf("    ✓ student_lead interview_scheduled_at set to: %s", interviewTime.Format(time.RFC3339))
+			}
 		}
 	} else {
 		log.Printf("    Updating course_payment table...")

@@ -28,14 +28,14 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Schedule meet
-	meetLink, err := services.ScheduleMeet(email)
+	meetLink, err := services.ScheduleMeet(req.StudentID, email)
 	if err != nil {
 		http.Error(w, "Error scheduling meet: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Update DB
-	_, err = db.DB.Exec("UPDATE student_lead SET meet_link = $1, application_status = 'MEETING_SCHEDULED' WHERE id = $2", meetLink, req.StudentID)
+	// Note: meet_link is already stored in ScheduleMeet(), just update application_status
+	_, err = db.DB.Exec("UPDATE student_lead SET application_status = 'MEETING_SCHEDULED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", req.StudentID)
 	if err != nil {
 		http.Error(w, "Error updating lead", http.StatusInternalServerError)
 		return
