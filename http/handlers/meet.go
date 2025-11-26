@@ -27,6 +27,18 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// REQUIREMENT: Check if registration fee is PAID before allowing interview scheduling
+	var regPaymentStatus string
+	err = db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", req.StudentID).Scan(&regPaymentStatus)
+	if err != nil {
+		http.Error(w, "Registration payment record not found. Please complete registration fee payment first", http.StatusBadRequest)
+		return
+	}
+	if regPaymentStatus != "PAID" {
+		http.Error(w, fmt.Sprintf("Interview cannot be scheduled. Registration payment status is %s. Please complete registration fee payment first", regPaymentStatus), http.StatusBadRequest)
+		return
+	}
+
 	// Schedule meet
 	meetLink, err := services.ScheduleMeet(req.StudentID, email)
 	if err != nil {
