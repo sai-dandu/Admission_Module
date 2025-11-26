@@ -34,13 +34,21 @@ func ValidateEmail(email string) error {
 	return nil
 }
 
-// ValidatePhone checks if phone is in E.164 format
+// ValidatePhone checks if phone is in E.164 format or basic format
 func ValidatePhone(phone string) error {
 	if phone == "" {
 		return fmt.Errorf("phone is required")
 	}
-	if !PhoneRegex.MatchString(phone) {
-		return fmt.Errorf("invalid phone format (use E.164 format, e.g., +919876543210)")
+
+	// More lenient check: at least 7 digits
+	digitCount := 0
+	for _, c := range phone {
+		if c >= '0' && c <= '9' {
+			digitCount++
+		}
+	}
+	if digitCount < 7 {
+		return fmt.Errorf("invalid phone format (must contain at least 7 digits or use E.164 format, e.g., +919876543210)")
 	}
 	return nil
 }
@@ -64,19 +72,19 @@ func ValidateEducation(education string) error {
 	return nil
 }
 
-// ValidateLeadSource checks if lead source is valid
-func ValidateLeadSource(leadSource string) error {
-	validSources := map[string]bool{
-		SourceWebsite:  true,
-		SourceReferral: true,
-		SourceCampaign: true,
-		GoogleAds:      true,
-		FacebookAds:    true,
+// // ValidateLeadSource checks if lead source is valid
+// func ValidateLeadSource(leadSource string) error {
+// 	validSources := map[string]bool{
+// 		SourceWebsite:  true,
+// 		SourceReferral: true,
+// 		SourceCampaign: true,
+// 		GoogleAds:      true,
+// 		FacebookAds:    true,
 
-		"": true,
-	}
-	if !validSources[leadSource] {
-		return fmt.Errorf("invalid lead source: %s", leadSource)
-	}
-	return nil
-}
+// 		"": true,
+// 	}
+// 	if !validSources[leadSource] {
+// 		return fmt.Errorf("invalid lead source: %s", leadSource)
+// 	}
+// 	return nil
+// }

@@ -30,11 +30,16 @@ func DeduplicateLeads(leads []models.Lead) []models.Lead {
 func ScanLead(rows *sql.Rows) (models.Lead, error) {
 	var lead models.Lead
 	var counsellorID sql.NullInt64
+	var registrationPaymentID sql.NullInt64
+	var selectedCourseID sql.NullInt64
+	var coursePaymentID sql.NullInt64
+	var interviewScheduledAt sql.NullTime
 
 	err := rows.Scan(
 		&lead.ID, &lead.Name, &lead.Email, &lead.Phone,
 		&lead.Education, &lead.LeadSource, &counsellorID,
-		&lead.PaymentStatus, &lead.MeetLink, &lead.ApplicationStatus,
+		&lead.MeetLink, &lead.ApplicationStatus,
+		&registrationPaymentID, &selectedCourseID, &coursePaymentID, &interviewScheduledAt,
 		&lead.CreatedAt, &lead.UpdatedAt,
 	)
 	if err != nil {
@@ -43,6 +48,25 @@ func ScanLead(rows *sql.Rows) (models.Lead, error) {
 
 	if counsellorID.Valid {
 		lead.CounsellorID = &counsellorID.Int64
+	}
+
+	if registrationPaymentID.Valid {
+		regPayID := int(registrationPaymentID.Int64)
+		lead.RegistrationPaymentID = &regPayID
+	}
+
+	if selectedCourseID.Valid {
+		selCourseID := int(selectedCourseID.Int64)
+		lead.SelectedCourseID = &selCourseID
+	}
+
+	if coursePaymentID.Valid {
+		coursePayID := int(coursePaymentID.Int64)
+		lead.CoursePaymentID = &coursePayID
+	}
+
+	if interviewScheduledAt.Valid {
+		lead.InterviewScheduledAt = &interviewScheduledAt.Time
 	}
 
 	return lead, nil

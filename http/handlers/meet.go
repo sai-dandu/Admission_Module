@@ -2,10 +2,9 @@ package handlers
 
 import (
 	"admission-module/db"
-	"admission-module/http/services"
+	"admission-module/services"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -22,33 +21,40 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 
 	// Get student email
 	var email string
-	err := db.DB.QueryRow("SELECT email FROM leads WHERE id = $1", req.StudentID).Scan(&email)
+	err := db.DB.QueryRow("SELECT email FROM student_lead WHERE id = $1", req.StudentID).Scan(&email)
 	if err != nil {
 		http.Error(w, "Student not found", http.StatusNotFound)
 		return
 	}
 
-	// Schedule meet
-	meetLink, err := services.ScheduleMeet(email)
+	// REQUIREMENT: Check if registration fee is PAID before allowing interview scheduling
+	var regPaymentStatus string
+	err = db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", req.StudentID).Scan(&regPaymentStatus)
 	if err != nil {
-		// Log detailed error server-side and return a helpful message to the client
-		log.Printf("ScheduleMeet error for student %d: %v", req.StudentID, err)
+		http.Error(w, "Registration payment record not found. Please complete registration fee payment first", http.StatusBadRequest)
+		return
+	}
+	if regPaymentStatus != "PAID" {
+		http.Error(w, fmt.Sprintf("Interview cannot be scheduled. Registration payment status is %s. Please complete registration fee payment first", regPaymentStatus), http.StatusBadRequest)
+		return
+	}
+
+	// Schedule meet
+	meetLink, err := services.ScheduleMeet(req.StudentID, email)
+	if err != nil {
 		http.Error(w, "Error scheduling meet: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Update DB
-	_, err = db.DB.Exec("UPDATE leads SET meet_link = $1, application_status = 'MEETING_SCHEDULED' WHERE id = $2", meetLink, req.StudentID)
+	// Note: meet_link is already stored in ScheduleMeet(), just update application_status
+	_, err = db.DB.Exec("UPDATE student_lead SET application_status = 'MEETING_SCHEDULED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", req.StudentID)
 	if err != nil {
 		http.Error(w, "Error updating lead", http.StatusInternalServerError)
 		return
 	}
 
 	// Send email
-	err = services.SendEmail(email, "Google Meet Scheduled", "Your meet link: "+meetLink)
-	if err != nil {
-		// Log error but don't fail
-	}
+	_ = services.SendEmail(email, "Google Meet Scheduled", "Your meet link: "+meetLink)
 
 	// Publish to Kafka
 	evt := map[string]interface{}{

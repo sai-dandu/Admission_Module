@@ -4,8 +4,9 @@ import (
 	"admission-module/config"
 	"admission-module/db"
 	"admission-module/http"
-	"admission-module/http/services"
 	"admission-module/logger"
+	"admission-module/services"
+	"fmt"
 	"log"
 	netHttp "net/http"
 	"os"
@@ -30,7 +31,6 @@ func main() {
 	if err := os.Chdir(absProjectRoot); err != nil {
 		log.Fatal("Error changing to project root:", err)
 	}
-	logger.Info("Working directory set to project root: %s", absProjectRoot)
 
 	// Load configuration
 	config.LoadConfig()
@@ -38,10 +38,53 @@ func main() {
 	// Initialize Kafka producer (non-fatal)
 	services.InitProducer()
 
+	// Initialize Kafka DLQ producer (non-fatal)
+	services.InitDLQProducer()
+
+	// Initialize and start Kafka consumer (non-fatal)
+	consumerTopics := []string{"payments", "applications", "emails"}
+	if err := services.InitConsumer(consumerTopics); err != nil {
+		logger.Warn("Failed to initialize Kafka consumer: %v", err)
+	} else {
+		services.StartConsumer()
+	}
+
+	// Start DLQ auto-retry mechanism
+	services.StartDLQAutoRetry()
+
 	// Initialize database
 	if err := db.InitDB(); err != nil {
 		logger.Fatal("Error initializing database: %v", err)
 	}
+
+	// Register email processor for Kafka consumer
+	// This callback will be invoked when Kafka consumer receives email.send events
+	services.RegisterEmailProcessor(func(event map[string]interface{}) error {
+		recipient, ok := event["recipient"].(string)
+		if !ok || recipient == "" {
+			return fmt.Errorf("invalid recipient in email event")
+		}
+		subject, ok := event["subject"].(string)
+		if !ok || subject == "" {
+			return fmt.Errorf("invalid subject in email event")
+		}
+		body, ok := event["body"].(string)
+		if !ok || body == "" {
+			return fmt.Errorf("invalid body in email event")
+		}
+		var attachment []string
+		if att, ok := event["attachment"].(string); ok && att != "" {
+			attachment = append(attachment, att)
+		}
+		return services.SendEmailDirect(recipient, subject, body, attachment...)
+	})
+
+	// Register interview scheduler for Kafka consumer
+	// This callback will be invoked when Kafka consumer receives interview.schedule events
+	services.RegisterInterviewScheduler(func(studentID int, email string) error {
+		_, err := services.ScheduleMeet(studentID, email)
+		return err
+	})
 
 	// Setup routes
 	http.SetupRoutes()
@@ -52,20 +95,24 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		logger.Info("Server starting on :8080")
 		log.Fatal(netHttp.ListenAndServe(":8080", nil))
 	}()
 
 	// Wait for shutdown signal
 	<-sigChan
-	logger.Info("Shutdown signal received, closing Kafka producer...")
+
+	// Stop DLQ auto-retry
+	services.StopDLQAutoRetry()
+
+	// Stop consumer gracefully
+	if err := services.StopConsumer(); err != nil {
+		logger.Error("Error stopping Kafka consumer: %v", err)
+	}
 
 	// Close Kafka producer gracefully
 	if err := services.Close(); err != nil {
 		logger.Error("Error closing Kafka producer: %v", err)
 	}
-
-	logger.Info("Server shutdown complete")
 }
 
 // findProjectRoot walks up from start and returns the first directory containing go.mod
