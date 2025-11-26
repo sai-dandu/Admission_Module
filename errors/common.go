@@ -1,3 +1,3 @@
 package errors
 
-// Deprecated: Use utils/validation.go instead.
+// This package is deprecated. Use utils/validation.go instead.

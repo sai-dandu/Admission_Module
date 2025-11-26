@@ -50,9 +50,7 @@ func main() {
 	}
 
 	// Start DLQ auto-retry mechanism
-	logger.Info("Initializing DLQ auto-retry...")
 	services.StartDLQAutoRetry()
-	logger.Info("DLQ auto-retry initialization complete")
 
 	// Initialize database
 	if err := db.InitDB(); err != nil {
@@ -80,7 +78,6 @@ func main() {
 		}
 		return services.SendEmailDirect(recipient, subject, body, attachment...)
 	})
-	logger.Info("✅ Email processor registered with Kafka consumer")
 
 	// Register interview scheduler for Kafka consumer
 	// This callback will be invoked when Kafka consumer receives interview.schedule events
@@ -88,7 +85,6 @@ func main() {
 		_, err := services.ScheduleMeet(studentID, email)
 		return err
 	})
-	logger.Info("✅ Interview scheduler registered with Kafka consumer")
 
 	// Setup routes
 	http.SetupRoutes()

@@ -45,7 +45,6 @@ func ScheduleMeet(studentID int, email string) (string, error) {
 	}
 
 	// Store meet_link in student_lead table
-	log.Printf("Storing meet_link in database for student ID: %d", studentID)
 	_, err = db.DB.Exec(
 		"UPDATE student_lead SET meet_link = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
 		meetLink, studentID)

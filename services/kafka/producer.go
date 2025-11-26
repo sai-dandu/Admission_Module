@@ -112,7 +112,6 @@ func ensureTopicsExist(brokers []string) {
 				if err != nil {
 					// Check if it's "topic already exists" error - that's OK
 					if strings.Contains(err.Error(), "already exists") {
-						logger.Info("✓ Kafka topic '%s' already exists", topic)
 						successCount++
 					}
 				} else {
@@ -178,7 +177,6 @@ func Publish(topic, key string, value interface{}) error {
 		}
 
 		lastErr = err
-		logger.Warn("Kafka publish attempt %d failed: %v", attempt+1, err)
 
 		if attempt < 2 {
 			backoffTime := time.Duration(math.Pow(2, float64(attempt))) * time.Second
@@ -189,7 +187,6 @@ func Publish(topic, key string, value interface{}) error {
 		// If this is the second attempt failing, try to recreate the producer
 		// to avoid stale broker metadata
 		if attempt == 1 {
-			logger.Info("Attempting to recreate Kafka producer due to connection issues")
 			if producer != nil {
 				producer.Close()
 			}
@@ -198,7 +195,6 @@ func Publish(topic, key string, value interface{}) error {
 	}
 
 	// Send to DLQ if all retries failed (database only, avoid recursion)
-	logger.Info("Sending failed message to DLQ. Topic: %s, Key: %s", topic, key)
 	if dlqErr := StoreDLQMessage(topic, key, payload, lastErr.Error()); dlqErr != nil {
 		logger.Error("Failed to send message to DLQ: %v", dlqErr)
 	}

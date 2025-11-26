@@ -305,7 +305,6 @@ func insertDefaultData() error {
 	}
 
 	if counselorCount == 0 {
-		log.Println("[DB] No counselors found, inserting default counselors...")
 		counselorQueries := []string{
 			fmt.Sprintf(`INSERT INTO counselor (name, email, phone, assigned_count, max_capacity, is_referral_enabled, created_at, updated_at) 
 				VALUES ('Dr. Rishi Kumar', 'rishi@university.edu', '+919876543210', 0, 15, true, '%s', '%s')`, now, now),
@@ -317,7 +316,7 @@ func insertDefaultData() error {
 
 		for _, query := range counselorQueries {
 			if _, err := DB.Exec(query); err != nil {
-				log.Printf("[DB] Warning: Error inserting counselor: %v", err)
+				// Silently skip on error
 			}
 		}
 	}
@@ -345,7 +344,7 @@ func insertDefaultData() error {
 
 		for _, query := range courseQueries {
 			if _, err := DB.Exec(query); err != nil {
-				log.Printf("[DB] Warning: Error inserting course: %v", err)
+				// Silently skip on error
 			}
 		}
 	}
