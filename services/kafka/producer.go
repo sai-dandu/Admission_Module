@@ -116,7 +116,6 @@ func ensureTopicsExist(brokers []string) {
 						successCount++
 					}
 				} else {
-					logger.Info("✓ Created Kafka topic '%s'", topic)
 					successCount++
 				}
 			}
@@ -125,7 +124,6 @@ func ensureTopicsExist(brokers []string) {
 
 			// If we created or found all topics, we're done
 			if successCount >= len(requiredTopics) {
-				logger.Info("✓ All required Kafka topics are available")
 				return
 			}
 

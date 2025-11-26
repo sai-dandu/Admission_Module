@@ -6,6 +6,7 @@ import (
 	"admission-module/http"
 	"admission-module/logger"
 	"admission-module/services"
+	"fmt"
 	"log"
 	netHttp "net/http"
 	"os"
@@ -57,6 +58,37 @@ func main() {
 	if err := db.InitDB(); err != nil {
 		logger.Fatal("Error initializing database: %v", err)
 	}
+
+	// Register email processor for Kafka consumer
+	// This callback will be invoked when Kafka consumer receives email.send events
+	services.RegisterEmailProcessor(func(event map[string]interface{}) error {
+		recipient, ok := event["recipient"].(string)
+		if !ok || recipient == "" {
+			return fmt.Errorf("invalid recipient in email event")
+		}
+		subject, ok := event["subject"].(string)
+		if !ok || subject == "" {
+			return fmt.Errorf("invalid subject in email event")
+		}
+		body, ok := event["body"].(string)
+		if !ok || body == "" {
+			return fmt.Errorf("invalid body in email event")
+		}
+		var attachment []string
+		if att, ok := event["attachment"].(string); ok && att != "" {
+			attachment = append(attachment, att)
+		}
+		return services.SendEmailDirect(recipient, subject, body, attachment...)
+	})
+	logger.Info("✅ Email processor registered with Kafka consumer")
+
+	// Register interview scheduler for Kafka consumer
+	// This callback will be invoked when Kafka consumer receives interview.schedule events
+	services.RegisterInterviewScheduler(func(studentID int, email string) error {
+		_, err := services.ScheduleMeet(email)
+		return err
+	})
+	logger.Info("✅ Interview scheduler registered with Kafka consumer")
 
 	// Setup routes
 	http.SetupRoutes()

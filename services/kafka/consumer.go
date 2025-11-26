@@ -18,6 +18,10 @@ var (
 	consumerMutex   sync.Mutex
 	consumerRunning bool
 	stopConsumer    chan bool
+	// emailProcessor is a callback to handle email sending from Kafka consumer
+	emailProcessor func(map[string]interface{}) error
+	// interviewScheduler is a callback to handle interview scheduling from Kafka consumer
+	interviewScheduler func(int, string) error
 )
 
 // InitConsumer initializes a Kafka reader (consumer) for specified topics
@@ -46,16 +50,15 @@ func InitConsumer(topics []string) error {
 		return nil
 	}
 
-	// Create a new consumer reader
-	// Note: kafka-go's Reader reads from a single topic at a time
-	// For simplicity, we subscribe to the first topic; in production, use separate consumers per topic or a topic pattern
+	// Listen specifically to "emails" topic for email events
+	emailTopic := "emails"
 	consumer = kafka.NewReader(kafka.ReaderConfig{
 		Brokers:          validBrokers,
-		Topic:            topics[0], // kafka-go reads from one topic at a time
+		Topic:            emailTopic,
 		GroupID:          "admission-module-consumer-group",
-		StartOffset:      -1,          // -1 = OffsetNewest (start from latest messages)
-		CommitInterval:   time.Second, // Commit offsets every second
-		MaxBytes:         10e6,        // 10MB max per fetch
+		StartOffset:      -1,
+		CommitInterval:   time.Second,
+		MaxBytes:         10e6,
 		SessionTimeout:   20 * time.Second,
 		ReadBackoffMin:   100 * time.Millisecond,
 		ReadBackoffMax:   1 * time.Second,
@@ -64,8 +67,24 @@ func InitConsumer(topics []string) error {
 	})
 
 	stopConsumer = make(chan bool)
-	logger.Info("Kafka consumer initialized. Brokers=%v, Topics=%v, ConsumerGroup=admission-module-consumer-group", validBrokers, topics)
+	logger.Info("Kafka consumer initialized. Brokers=%v, Topic=%s, ConsumerGroup=admission-module-consumer-group", validBrokers, emailTopic)
 	return nil
+}
+
+// RegisterEmailProcessor registers the callback function that handles email.send events
+func RegisterEmailProcessor(fn func(map[string]interface{}) error) {
+	consumerMutex.Lock()
+	defer consumerMutex.Unlock()
+	emailProcessor = fn
+	logger.Info("Email processor registered")
+}
+
+// RegisterInterviewScheduler registers the callback function that handles interview.schedule events
+func RegisterInterviewScheduler(fn func(int, string) error) {
+	consumerMutex.Lock()
+	defer consumerMutex.Unlock()
+	interviewScheduler = fn
+	logger.Info("Interview scheduler registered")
 }
 
 // StartConsumer starts consuming messages in a separate goroutine
@@ -160,86 +179,103 @@ func HandleKafkaMessageForRetry(msg kafka.Message) bool {
 	eventType, ok := eventData["event"].(string)
 	if !ok {
 		logger.Warn("Message does not contain event type")
-		// Send to DLQ for invalid event type
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Message does not contain valid event type")
 		return false
 	}
 
-	// Handle different event types with error handling
 	var handlerErr error
 	switch eventType {
-	case "lead.created":
-		handlerErr = handleLeadCreated(eventData)
-	case "payment.initiated":
-		handlerErr = handlePaymentInitiated(eventData)
-	case "payment.verified":
-		handlerErr = handlePaymentVerified(eventData)
+	case "email.send":
+		handlerErr = handleEmailSend(eventData)
+	case "interview.schedule":
+		handlerErr = handleInterviewSchedule(eventData)
 	case "email.sent", "email.acceptance":
-		handlerErr = handleEmailSent(eventData)
-	case "application.submitted":
-		handlerErr = handleApplicationSubmitted(eventData)
-	case "interview.scheduled", "interview.schedule":
-		handlerErr = handleInterviewScheduled(eventData)
+		handlerErr = handleEmailSentTracking(eventData)
 	default:
 		logger.Warn("Unknown event type: %s", eventType)
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Unknown event type: "+eventType)
 		return false
 	}
 
-	// If handler returned an error, send to DLQ
 	if handlerErr != nil {
 		logger.Error("Error handling event type %s: %v", eventType, handlerErr)
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Handler error: "+handlerErr.Error())
 		return false
 	}
 
-	// Success! Message was processed without errors
 	return true
 }
 
-// ============================================================================
-// EVENT HANDLERS - Process different event types
-// ============================================================================
-
-// handleLeadCreated processes lead.created events
-func handleLeadCreated(event map[string]interface{}) error {
-	return nil
-}
-
-// handlePaymentInitiated processes payment.initiated events
-func handlePaymentInitiated(event map[string]interface{}) error {
-	return nil
-}
-
-// handlePaymentVerified processes payment.verified events
-func handlePaymentVerified(event map[string]interface{}) error {
-	return nil
-}
-
-// handleEmailSent processes email.sent events
-func handleEmailSent(event map[string]interface{}) error {
-	return nil
-}
-
-// handleApplicationSubmitted processes application events
-func handleApplicationSubmitted(event map[string]interface{}) error {
-	return nil
-}
-
-// handleInterviewScheduled processes interview.scheduled events
-func handleInterviewScheduled(event map[string]interface{}) error {
-	email, ok := event["email"].(string)
-	if !ok || email == "" {
-		return fmt.Errorf("invalid email")
+// handleEmailSend processes email.send events
+func handleEmailSend(event map[string]interface{}) error {
+	recipient, ok := event["recipient"].(string)
+	if !ok || recipient == "" {
+		return fmt.Errorf("invalid recipient in email event")
 	}
 
-	meetLink, ok := event["meet_link"].(string)
-	if !ok || meetLink == "" {
-		return fmt.Errorf("invalid meet_link")
+	subject, ok := event["subject"].(string)
+	if !ok || subject == "" {
+		return fmt.Errorf("invalid subject in email event")
 	}
 
-	// Note: SendEmail is called from parent services package
-	// This will be resolved through the services initialization
+	body, ok := event["body"].(string)
+	if !ok || body == "" {
+		return fmt.Errorf("invalid body in email event")
+	}
+
+	var attachment []string
+	if att, ok := event["attachment"].(string); ok && att != "" {
+		attachment = append(attachment, att)
+	}
+
+	logger.Info("📧 Sending email - Recipient: %s, Subject: %s", recipient, subject)
+
+	consumerMutex.Lock()
+	processor := emailProcessor
+	consumerMutex.Unlock()
+
+	if processor != nil {
+		return processor(event)
+	}
+
+	return fmt.Errorf("email processor not registered")
+}
+
+// handleInterviewSchedule processes interview.schedule events from payment webhook
+// This handler sends interview scheduling emails via the interview scheduler callback
+func handleInterviewSchedule(event map[string]interface{}) error {
+	studentID, ok := event["student_id"].(float64)
+	if !ok {
+		return fmt.Errorf("invalid student_id in interview schedule event")
+	}
+
+	studentName, ok := event["name"].(string)
+	if !ok || studentName == "" {
+		return fmt.Errorf("invalid student name in interview schedule event")
+	}
+
+	studentEmail, ok := event["email"].(string)
+	if !ok || studentEmail == "" {
+		return fmt.Errorf("invalid student email in interview schedule event")
+	}
+
+	logger.Info("Interview scheduling for student: %d, Email: %s", int(studentID), studentEmail)
+
+	// Call the registered interview scheduler callback to handle meeting link generation and email sending
+	consumerMutex.Lock()
+	scheduler := interviewScheduler
+	consumerMutex.Unlock()
+
+	if scheduler != nil {
+		return scheduler(int(studentID), studentEmail)
+	}
+
+	return fmt.Errorf("interview scheduler not registered")
+}
+
+// handleEmailSentTracking processes email tracking events
+func handleEmailSentTracking(event map[string]interface{}) error {
+	logger.Info("📧 Email tracking - Event: %v", event["event"])
 	return nil
 }
 

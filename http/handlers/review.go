@@ -17,7 +17,7 @@ func ApplicationActionHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		StudentID        int    `json:"student_id"`
-		Status           string `json:"status"` // ACCEPTED or REJECTED
+		Status           string `json:"status"`
 		SelectedCourseID *int   `json:"selected_course_id,omitempty"`
 	}
 
@@ -56,14 +56,13 @@ func handleApplicationAcceptance(w http.ResponseWriter, appService *services.App
 		return
 	}
 
-	// Send acceptance email asynchronously (includes Kafka event publishing)
+	// Send acceptance email asynchronously via Kafka
 	go func() {
 		if err := services.SendAcceptanceEmail(result.StudentName, result.StudentEmail, result.CourseName, result.CourseFee); err != nil {
-			log.Printf("Warning: failed to send acceptance email: %v", err)
+			log.Printf("Warning: failed to queue acceptance email: %v", err)
 		}
 	}()
 
-	// Return success response with payment details
 	response.SuccessResponse(w, http.StatusOK, "Application accepted successfully", map[string]interface{}{
 		"student_id":      studentID,
 		"student_name":    result.StudentName,
@@ -91,14 +90,13 @@ func handleApplicationRejection(w http.ResponseWriter, appService *services.Appl
 		return
 	}
 
-	// Send rejection email asynchronously (includes Kafka event publishing)
+	// Send rejection email asynchronously via Kafka
 	go func() {
 		if err := services.SendRejectionEmail(result.StudentName, result.StudentEmail); err != nil {
-			log.Printf("Warning: failed to send rejection email: %v", err)
+			log.Printf("Warning: failed to queue rejection email: %v", err)
 		}
 	}()
 
-	// Return success response
 	response.SuccessResponse(w, http.StatusOK, "Application rejected successfully", map[string]interface{}{
 		"student_id":    studentID,
 		"student_name":  result.StudentName,

@@ -323,11 +323,8 @@ func processPaymentCaptured(orderID, paymentID, signature string) error {
 		log.Printf("  [WEBHOOK] Publishing payment.verified event to Kafka (retry)...")
 		publishPaymentVerifiedFromWebhook(studentID, orderID, paymentID, paymentType)
 
-		// If registration payment, also schedule interview (retry)
-		if paymentType == PaymentTypeRegistration {
-			log.Printf("  [WEBHOOK] Scheduling interview after registration payment (retry)...")
-			scheduleInterviewAfterPayment(studentID)
-		}
+		// For duplicate payments, do NOT reschedule the interview
+		// It was already scheduled on the first successful payment
 
 		log.Printf("✅ [WEBHOOK] Successfully handled duplicate/retry webhook - OrderID: %s, PaymentID: %s, StudentID: %d", orderID, paymentID, studentID)
 		return nil
@@ -559,7 +556,7 @@ func scheduleInterviewAfterPayment(studentID int) {
 			return
 		}
 
-		// Publish interview.schedule event
+		// Publish interview.schedule event to emails topic (for unified Kafka consumer processing)
 		evt := map[string]interface{}{
 			"event":      "interview.schedule",
 			"student_id": studentID,
@@ -567,7 +564,7 @@ func scheduleInterviewAfterPayment(studentID int) {
 			"email":      email,
 			"ts":         time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := Publish("interviews", fmt.Sprintf("student-%d", studentID), evt); err != nil {
+		if err := Publish("emails", fmt.Sprintf("student-%d", studentID), evt); err != nil {
 			log.Printf("Warning: failed to publish interview.schedule event: %v", err)
 		}
 	}()
