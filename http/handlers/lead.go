@@ -17,18 +17,14 @@ import (
 	"time"
 )
 
-// LeadService handles all lead-related operations
 type LeadService struct {
 	db *sql.DB
 }
 
-// NewLeadService creates a new instance of LeadService with the provided database connection
 func NewLeadService(database *sql.DB) *LeadService {
 	return &LeadService{db: database}
 }
 
-// UploadLeads handles bulk lead upload via Excel file
-// It processes the uploaded file, validates leads, removes duplicates, and stores them in the database
 func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -38,15 +34,13 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Extract and validate file upload
-	file, header, err := r.FormFile("file")
+	file, _, err := r.FormFile("file")
 	if err != nil {
 		log.Printf("Error getting form file: %v", err)
 		respondError(w, "Invalid file", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
-
-	log.Printf("Processing file upload: %s", header.Filename)
 
 	// Create temporary file with automatic cleanup
 	tempFile, err := os.CreateTemp("", "leads_*.xlsx")
@@ -101,8 +95,6 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 		successCount++
 	}
 
-	log.Printf("Bulk upload completed: %d successful, %d failed", successCount, len(failedLeads))
-
 	// Build response
 	response := map[string]interface{}{
 		"message":       fmt.Sprintf("Successfully uploaded %d leads", successCount),
@@ -118,8 +110,6 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, response)
 }
 
-// processAndInsertLead handles the complete lead creation workflow with transaction support
-// It validates the lead, checks for duplicates, assigns a counselor, and inserts the lead record
 func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lead) error {
 	// Set timestamps
 	now := time.Now()
@@ -154,10 +144,6 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 			return fmt.Errorf("error assigning counselor: %w", err)
 		}
 		lead.CounsellorID = counselorID
-
-		if counselorID == nil {
-			log.Printf("Warning: No available counselor for lead source: %s", lead.LeadSource)
-		}
 	}
 
 	// Insert lead into database
@@ -179,10 +165,7 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	log.Printf("Lead created successfully: ID=%d, Email=%s, Counselor=%v",
-		leadID, lead.Email, lead.CounsellorID)
-
-	// Send welcome email asynchronously (non-blocking)
+	// Send welcome email asynchronously
 	if err := services.SendWelcomeEmailWithCounselorInfo(ctx, lead); err != nil {
 		log.Printf("Warning: failed to send welcome email: %v", err)
 		// Don't fail the operation if email fails
@@ -191,8 +174,6 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 	return nil
 }
 
-// GetLeads retrieves leads with optional time-based filters
-// It supports filtering by creation date and returns paginated results
 func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -263,8 +244,6 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Retrieved %d leads", len(leads))
-
 	// Convert leads to response format
 	leadResponses := utils.ConvertLeadsToResponse(leads)
 
@@ -277,8 +256,6 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, response)
 }
 
-// CreateLead handles single lead creation from JSON payload
-// It validates the lead data, assigns a counselor, and stores it in the database
 func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -324,9 +301,6 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, response)
 }
 
-// Response types
-
-// GetLeadsResponse represents the API response for retrieving leads
 type GetLeadsResponse struct {
 	Status  string                `json:"status"`
 	Message string                `json:"message"`
@@ -334,7 +308,6 @@ type GetLeadsResponse struct {
 	Data    []models.LeadResponse `json:"data"`
 }
 
-// CreateLeadResponse represents the API response for creating a lead
 type CreateLeadResponse struct {
 	Message       string `json:"message"`
 	StudentID     int64  `json:"student_id"`
@@ -342,28 +315,20 @@ type CreateLeadResponse struct {
 	Email         string `json:"email"`
 }
 
-// HTTP helper functions
-
-// respondJSON sends a JSON response with the given status code
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	resp.SendJSON(w, status, data)
 }
 
-// respondError sends an error response with the given status code
 func respondError(w http.ResponseWriter, message string, status int) {
 	resp.ErrorResponse(w, status, message)
 }
 
-// Public handler wrappers for backward compatibility with existing routes
-
 var service *LeadService
 
-// InitHandlers initializes the lead service with database connection
 func InitHandlers(database *sql.DB) {
 	service = NewLeadService(database)
 }
 
-// UploadLeads is the public handler for uploading leads via Excel
 func UploadLeads(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)
@@ -371,7 +336,6 @@ func UploadLeads(w http.ResponseWriter, r *http.Request) {
 	service.UploadLeads(w, r)
 }
 
-// GetLeads is the public handler for retrieving leads
 func GetLeads(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)
@@ -379,7 +343,6 @@ func GetLeads(w http.ResponseWriter, r *http.Request) {
 	service.GetLeads(w, r)
 }
 
-// CreateLead is the public handler for creating a single lead
 func CreateLead(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		service = NewLeadService(db.DB)

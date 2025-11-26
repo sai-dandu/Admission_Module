@@ -45,7 +45,6 @@ func ApplicationActionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleApplicationAcceptance processes application acceptance
 func handleApplicationAcceptance(w http.ResponseWriter, appService *services.ApplicationService, studentID, courseID int) {
 	result, err := appService.AcceptApplication(services.AcceptApplicationRequest{
 		StudentID:        studentID,
@@ -82,7 +81,6 @@ func handleApplicationAcceptance(w http.ResponseWriter, appService *services.App
 	})
 }
 
-// handleApplicationRejection processes application rejection
 func handleApplicationRejection(w http.ResponseWriter, appService *services.ApplicationService, studentID int) {
 	result, err := appService.RejectApplication(services.RejectApplicationRequest{
 		StudentID: studentID,
@@ -110,7 +108,6 @@ func handleApplicationRejection(w http.ResponseWriter, appService *services.Appl
 	})
 }
 
-// ApplicationAction is a backward compatibility wrapper for ApplicationActionHandler
 func ApplicationAction(w http.ResponseWriter, r *http.Request) {
 	ApplicationActionHandler(w, r)
 }

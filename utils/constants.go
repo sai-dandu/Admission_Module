@@ -16,5 +16,4 @@ const (
 	SourceCampaign = "campaign"
 	FacebookAds    = "facebook_ads"
 	GoogleAds      = "google_ads"
-	
 )

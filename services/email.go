@@ -152,9 +152,7 @@ func PublishEmailSentEvent(emailType, recipient, subject string, metadata map[st
 			log.Printf("Warning: failed to publish email.%s event: %v", emailType, err)
 		}
 	}()
-}
-
-// SendEmailWithKafkaEvent sends email and publishes event to Kafka
+} // SendEmailWithKafkaEvent sends email and publishes event to Kafka
 func SendEmailWithKafkaEvent(to, subject, body string, emailType string, metadata map[string]interface{}) error {
 	// Send email
 	if err := SendEmail(to, subject, body); err != nil {

@@ -5,7 +5,6 @@ import (
 	"admission-module/services"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -31,8 +30,6 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 	// Schedule meet
 	meetLink, err := services.ScheduleMeet(email)
 	if err != nil {
-		// Log detailed error server-side and return a helpful message to the client
-		log.Printf("ScheduleMeet error for student %d: %v", req.StudentID, err)
 		http.Error(w, "Error scheduling meet: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -45,10 +42,7 @@ func ScheduleMeet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send email
-	err = services.SendEmail(email, "Google Meet Scheduled", "Your meet link: "+meetLink)
-	if err != nil {
-		// Log error but don't fail
-	}
+	_ = services.SendEmail(email, "Google Meet Scheduled", "Your meet link: "+meetLink)
 
 	// Publish to Kafka
 	evt := map[string]interface{}{

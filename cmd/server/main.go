@@ -30,6 +30,8 @@ func main() {
 	if err := os.Chdir(absProjectRoot); err != nil {
 		log.Fatal("Error changing to project root:", err)
 	}
+
+	// Load configuration
 	config.LoadConfig()
 
 	// Initialize Kafka producer (non-fatal)

@@ -4,7 +4,11 @@ import (
 	"admission-module/config"
 	"database/sql"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -104,8 +108,6 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
-		refund_id VARCHAR(255),
-		refund_amount NUMERIC(10, 2),
 		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -127,8 +129,6 @@ func createTables() error {
 		order_id VARCHAR(255) UNIQUE,
 		payment_id VARCHAR(255),
 		razorpay_sign TEXT,
-		refund_id VARCHAR(255),
-		refund_amount NUMERIC(10, 2),
 		error_message TEXT,
 		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -146,14 +146,13 @@ func createTables() error {
 	);`
 
 	// Razorpay webhook logs table
-	webhookLogsTable := `
+	_ = `
 	CREATE TABLE IF NOT EXISTS razorpay_webhook_logs (
 		id BIGSERIAL PRIMARY KEY,
 		webhook_id VARCHAR(255) UNIQUE NOT NULL,
 		event_type VARCHAR(100) NOT NULL,
 		order_id VARCHAR(255),
 		payment_id VARCHAR(255),
-		refund_id VARCHAR(255),
 		student_id INTEGER,
 		amount_paise BIGINT,
 		currency VARCHAR(10),
@@ -169,7 +168,7 @@ func createTables() error {
 	);`
 
 	// Razorpay webhooks table
-	razorpayWebhooksTable := `
+	_ = `
 	CREATE TABLE IF NOT EXISTS razorpay_webhooks (
 		id SERIAL PRIMARY KEY,
 		webhook_id VARCHAR(255) UNIQUE NOT NULL,
@@ -234,7 +233,6 @@ func createTables() error {
 	if err := applyMigrations(); err != nil {
 		log.Printf("Warning: Error applying migrations: %v", err)
 	}
-	log.Println("[DB] ✓ Migrations applied")
 
 	// Insert default dummy data if empty
 	if err := insertDefaultData(); err != nil {
@@ -245,39 +243,55 @@ func createTables() error {
 }
 
 func applyMigrations() error {
-	// Drop old payment_status column if it exists
-	DB.Exec(`ALTER TABLE student_lead DROP COLUMN IF EXISTS payment_status;`)
-
-	// Add new payment status columns if they don't exist
-	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS registration_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
-	DB.Exec(`ALTER TABLE student_lead ADD COLUMN IF NOT EXISTS course_fee_status VARCHAR(50) DEFAULT 'PENDING';`)
-
-	// Add refund tracking columns to payment tables
-	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
-	DB.Exec(`ALTER TABLE registration_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
-	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_id VARCHAR(255);`)
-	DB.Exec(`ALTER TABLE course_payment ADD COLUMN IF NOT EXISTS refund_amount NUMERIC(10, 2);`)
-
-	// Create performance indexes
-	indexQueries := []string{
-		`CREATE INDEX IF NOT EXISTS idx_student_lead_registration_fee_status ON student_lead(registration_fee_status);`,
-		`CREATE INDEX IF NOT EXISTS idx_student_lead_course_fee_status ON student_lead(course_fee_status);`,
-		`CREATE INDEX IF NOT EXISTS idx_student_lead_interview_scheduled ON student_lead(interview_scheduled_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_registration_payment_student_id ON registration_payment(student_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_registration_payment_order_id ON registration_payment(order_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_course_payment_student_id ON course_payment(student_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_course_payment_order_id ON course_payment(order_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_dlq_created_at ON dlq_messages(created_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_dlq_resolved ON dlq_messages(resolved);`,
-		`CREATE INDEX IF NOT EXISTS idx_dlq_topic ON dlq_messages(topic);`,
-		`CREATE INDEX IF NOT EXISTS idx_dlq_unresolved ON dlq_messages(resolved) WHERE resolved = FALSE;`,
+	// Find project root to resolve migration file path correctly
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Printf("Warning: Could not get working directory: %v", err)
+		return err
 	}
 
-	for _, query := range indexQueries {
-		DB.Exec(query)
+	projectRoot := findProjectRoot(cwd)
+	if projectRoot == "" {
+		log.Printf("Warning: Could not find project root (go.mod not found)")
+		return fmt.Errorf("project root not found")
+	}
+
+	// Read and execute the single consolidated migration file
+	migrationFile := "001_complete_schema.sql"
+	migrationPath := filepath.Join(projectRoot, "db", "migrations", migrationFile)
+
+	// Read migration file
+	migrationSQL, err := ioutil.ReadFile(migrationPath)
+	if err != nil {
+		log.Printf("Warning: Could not read migration file at %s: %v", migrationPath, err)
+		return err
+	}
+
+	// Execute migration
+	if _, err := DB.Exec(string(migrationSQL)); err != nil {
+		log.Printf("Warning: Error executing migration %s: %v", migrationFile, err)
+		return err
 	}
 
 	return nil
+}
+
+// findProjectRoot walks up from start and returns the first directory containing go.mod
+func findProjectRoot(start string) string {
+	dir := start
+	for {
+		// check for go.mod
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		// move up
+		parent := filepath.Dir(dir)
+		if parent == dir || strings.HasSuffix(dir, ":\\") || parent == "" {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }
 
 func insertDefaultData() error {
@@ -316,7 +330,6 @@ func insertDefaultData() error {
 	}
 
 	if courseCount == 0 {
-		log.Println("[DB] No courses found, inserting default courses...")
 		courseQueries := []string{
 			fmt.Sprintf(`INSERT INTO course (name, description, fee, duration, is_active, created_at, updated_at) 
 				VALUES ('B.Tech Computer Science', 'Bachelor of Technology in Computer Science - 4 year program covering programming, databases, and software development', 125000.00, '4 Years', 1, '%s', '%s')`, now, now),
