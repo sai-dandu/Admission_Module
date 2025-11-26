@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strconv"
 
+	"admission-module/http/response"
 	"admission-module/logger"
 	"admission-module/services"
-	"admission-module/utils"
 )
 
 // GetDLQMessages retrieves unresolved DLQ messages
@@ -29,11 +29,11 @@ func GetDLQMessages(w http.ResponseWriter, r *http.Request) {
 	messages, err := services.GetDLQMessages(limit)
 	if err != nil {
 		logger.Error("Error fetching DLQ messages: %v", err)
-		utils.SendError(w, http.StatusInternalServerError, "Failed to fetch DLQ messages: "+err.Error())
+		response.ErrorResponse(w, http.StatusInternalServerError, "Failed to fetch DLQ messages: "+err.Error())
 		return
 	}
 
-	utils.SendSuccess(w, http.StatusOK, "DLQ messages retrieved", map[string]interface{}{
+	response.SuccessResponse(w, http.StatusOK, "DLQ messages retrieved", map[string]interface{}{
 		"count": len(messages),
 		"data":  messages,
 	})
@@ -49,17 +49,17 @@ func RetryDLQMessage(w http.ResponseWriter, r *http.Request) {
 
 	messageID := r.URL.Query().Get("id")
 	if messageID == "" {
-		utils.SendError(w, http.StatusBadRequest, "Missing message ID parameter")
+		response.ErrorResponse(w, http.StatusBadRequest, "Missing message ID parameter")
 		return
 	}
 
 	if err := services.RetryDLQMessage(messageID); err != nil {
 		logger.Error("Error retrying DLQ message %s: %v", messageID, err)
-		utils.SendError(w, http.StatusInternalServerError, "Failed to retry message: "+err.Error())
+		response.ErrorResponse(w, http.StatusInternalServerError, "Failed to retry message: "+err.Error())
 		return
 	}
 
-	utils.SendSuccess(w, http.StatusOK, "Message retry initiated", map[string]interface{}{
+	response.SuccessResponse(w, http.StatusOK, "Message retry initiated", map[string]interface{}{
 		"messageId": messageID,
 	})
 }
@@ -74,7 +74,7 @@ func ResolveDLQMessage(w http.ResponseWriter, r *http.Request) {
 
 	messageID := r.URL.Query().Get("id")
 	if messageID == "" {
-		utils.SendError(w, http.StatusBadRequest, "Missing message ID parameter")
+		response.ErrorResponse(w, http.StatusBadRequest, "Missing message ID parameter")
 		return
 	}
 
@@ -87,11 +87,11 @@ func ResolveDLQMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := services.ResolveDLQMessage(messageID, req.Notes); err != nil {
 		logger.Error("Error resolving DLQ message %s: %v", messageID, err)
-		utils.SendError(w, http.StatusInternalServerError, "Failed to resolve message: "+err.Error())
+		response.ErrorResponse(w, http.StatusInternalServerError, "Failed to resolve message: "+err.Error())
 		return
 	}
 
-	utils.SendSuccess(w, http.StatusOK, "Message marked as resolved", map[string]interface{}{
+	response.SuccessResponse(w, http.StatusOK, "Message marked as resolved", map[string]interface{}{
 		"messageId": messageID,
 	})
 }
@@ -107,9 +107,9 @@ func GetDLQStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := services.GetDLQStats()
 	if err != nil {
 		logger.Error("Error fetching DLQ statistics: %v", err)
-		utils.SendError(w, http.StatusInternalServerError, "Failed to fetch DLQ statistics: "+err.Error())
+		response.ErrorResponse(w, http.StatusInternalServerError, "Failed to fetch DLQ statistics: "+err.Error())
 		return
 	}
 
-	utils.SendSuccess(w, http.StatusOK, "DLQ statistics", stats)
+	response.SuccessResponse(w, http.StatusOK, "DLQ statistics", stats)
 }

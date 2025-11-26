@@ -411,6 +411,19 @@ func (s *PaymentService) CheckPaymentEligibility(studentID int, paymentType stri
 			return false, "Course not found", err
 		}
 
+		// Check if registration fee is PAID (REQUIREMENT: Student cannot pay course fee until registration fee is paid)
+		var regPaymentStatus string
+		err = db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", studentID).Scan(&regPaymentStatus)
+		if err == sql.ErrNoRows {
+			return false, "Registration payment not initiated. Please pay the registration fee first", nil
+		}
+		if err != nil {
+			return false, "Error checking registration payment status", err
+		}
+		if regPaymentStatus != PaymentStatusPaid {
+			return false, fmt.Sprintf("Registration payment status is %s. Please complete registration fee payment before proceeding with course fee payment", regPaymentStatus), nil
+		}
+
 		// Check if course payment already paid
 		var status string
 		err = db.DB.QueryRow("SELECT status FROM course_payment WHERE student_id = $1 AND course_id = $2", studentID, *courseID).Scan(&status)

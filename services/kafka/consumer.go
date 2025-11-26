@@ -67,7 +67,6 @@ func InitConsumer(topics []string) error {
 	})
 
 	stopConsumer = make(chan bool)
-	logger.Info("Kafka consumer initialized. Brokers=%v, Topic=%s, ConsumerGroup=admission-module-consumer-group", validBrokers, emailTopic)
 	return nil
 }
 
@@ -76,7 +75,6 @@ func RegisterEmailProcessor(fn func(map[string]interface{}) error) {
 	consumerMutex.Lock()
 	defer consumerMutex.Unlock()
 	emailProcessor = fn
-	logger.Info("Email processor registered")
 }
 
 // RegisterInterviewScheduler registers the callback function that handles interview.schedule events
@@ -84,7 +82,6 @@ func RegisterInterviewScheduler(fn func(int, string) error) {
 	consumerMutex.Lock()
 	defer consumerMutex.Unlock()
 	interviewScheduler = fn
-	logger.Info("Interview scheduler registered")
 }
 
 // StartConsumer starts consuming messages in a separate goroutine
@@ -93,12 +90,10 @@ func StartConsumer() {
 	consumerMutex.Lock()
 	if consumer == nil {
 		consumerMutex.Unlock()
-		logger.Warn("Consumer not initialized, cannot start")
 		return
 	}
 	if consumerRunning {
 		consumerMutex.Unlock()
-		logger.Warn("Consumer already running")
 		return
 	}
 	consumerRunning = true
@@ -106,7 +101,6 @@ func StartConsumer() {
 
 	// Run consumer in a goroutine so it doesn't block the main server
 	go consumeMessages()
-	logger.Info("✅ Kafka consumer started")
 }
 
 // consumeMessages continuously reads messages from Kafka and processes them
@@ -123,7 +117,6 @@ func consumeMessages() {
 	for {
 		select {
 		case <-stopConsumer:
-			logger.Info("Consumer stop signal received")
 			return
 		default:
 			// Read the next message with timeout
@@ -167,18 +160,14 @@ func HandleKafkaMessageForRetry(msg kafka.Message) bool {
 	var eventData map[string]interface{}
 	err := json.Unmarshal(msg.Value, &eventData)
 	if err != nil {
-		logger.Error("Error unmarshaling message: %v", err)
 		// Send to DLQ on unmarshal error
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Failed to unmarshal JSON: "+err.Error())
 		return false
 	}
 
-	logger.Info("Event type: %v", eventData["event"])
-
 	// Route to appropriate handler based on event type
 	eventType, ok := eventData["event"].(string)
 	if !ok {
-		logger.Warn("Message does not contain event type")
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Message does not contain valid event type")
 		return false
 	}
@@ -192,13 +181,11 @@ func HandleKafkaMessageForRetry(msg kafka.Message) bool {
 	case "email.sent", "email.acceptance":
 		handlerErr = handleEmailSentTracking(eventData)
 	default:
-		logger.Warn("Unknown event type: %s", eventType)
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Unknown event type: "+eventType)
 		return false
 	}
 
 	if handlerErr != nil {
-		logger.Error("Error handling event type %s: %v", eventType, handlerErr)
 		_ = SendToDLQ(msg.Topic, string(msg.Key), msg.Value, "Handler error: "+handlerErr.Error())
 		return false
 	}
@@ -227,8 +214,6 @@ func handleEmailSend(event map[string]interface{}) error {
 	if att, ok := event["attachment"].(string); ok && att != "" {
 		attachment = append(attachment, att)
 	}
-
-	logger.Info("📧 Sending email - Recipient: %s, Subject: %s", recipient, subject)
 
 	consumerMutex.Lock()
 	processor := emailProcessor

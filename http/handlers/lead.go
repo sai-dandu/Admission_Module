@@ -45,7 +45,6 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 	// Create temporary file with automatic cleanup
 	tempFile, err := os.CreateTemp("", "leads_*.xlsx")
 	if err != nil {
-		log.Printf("Error creating temp file: %v", err)
 		respondError(w, "Error processing file", http.StatusInternalServerError)
 		return
 	}
@@ -57,19 +56,17 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 
 	// Copy uploaded file to temp location
 	if _, err = io.Copy(tempFile, file); err != nil {
-		log.Printf("Error copying file: %v", err)
 		respondError(w, "Error saving file", http.StatusInternalServerError)
 		return
 	}
 
 	if err := tempFile.Close(); err != nil {
-		log.Printf("Error closing temp file: %v", err)
+		// Silent fail on temp file close
 	}
 
 	// Parse Excel file
 	leads, err := services.ParseExcel(tempFilePath)
 	if err != nil {
-		log.Printf("Error parsing Excel: %v", err)
 		respondError(w, "Error parsing Excel: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -83,9 +80,8 @@ func (s *LeadService) UploadLeads(w http.ResponseWriter, r *http.Request) {
 
 	for i, lead := range leads {
 		if err := s.processAndInsertLead(ctx, &lead); err != nil {
-			log.Printf("Failed to process lead %d (%s): %v", i+1, lead.Email, err)
 			failedLeads = append(failedLeads, map[string]string{
-				"row":   fmt.Sprintf("%d", i+2), // +2 for header row
+				"row":   fmt.Sprintf("%d", i+2),
 				"email": lead.Email,
 				"phone": lead.Phone,
 				"error": err.Error(),
@@ -167,7 +163,6 @@ func (s *LeadService) processAndInsertLead(ctx context.Context, lead *models.Lea
 
 	// Send welcome email asynchronously
 	if err := services.SendWelcomeEmailWithCounselorInfo(ctx, lead); err != nil {
-		log.Printf("Warning: failed to send welcome email: %v", err)
 		// Don't fail the operation if email fails
 	}
 
@@ -220,7 +215,6 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	// Execute query
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error fetching leads: %v", err)
 		respondError(w, "Error fetching leads", http.StatusInternalServerError)
 		return
 	}
@@ -231,7 +225,6 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		lead, err := utils.ScanLead(rows)
 		if err != nil {
-			log.Printf("Error scanning lead: %v", err)
 			respondError(w, "Error processing leads", http.StatusInternalServerError)
 			return
 		}
@@ -239,7 +232,6 @@ func (s *LeadService) GetLeads(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = rows.Err(); err != nil {
-		log.Printf("Error iterating leads: %v", err)
 		respondError(w, "Error processing leads", http.StatusInternalServerError)
 		return
 	}
@@ -267,15 +259,12 @@ func (s *LeadService) CreateLead(w http.ResponseWriter, r *http.Request) {
 	// Decode JSON request body
 	var lead models.Lead
 	if err := json.NewDecoder(r.Body).Decode(&lead); err != nil {
-		log.Printf("Error decoding JSON: %v", err)
 		respondError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Process and insert lead
 	if err := s.processAndInsertLead(ctx, &lead); err != nil {
-		log.Printf("Error creating lead: %v", err)
-
 		// Determine appropriate HTTP status code based on error type
 		statusCode := http.StatusInternalServerError
 		if err.Error() == "lead already exists with this email or phone" {

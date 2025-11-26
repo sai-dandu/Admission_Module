@@ -14,13 +14,6 @@ import (
 	"time"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // RazorpayWebhookPayload represents the structure of Razorpay webhook payload
 type RazorpayWebhookPayload struct {
 	ID        string                 `json:"id"`
@@ -85,7 +78,7 @@ func RazorpayWebhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Log the webhook to database
 	if err := logWebhookToDB(payload, signature, signatureValid, ""); err != nil {
-		log.Printf("[WEBHOOK] DB error: %v", err)
+		log.Printf("Webhook DB logging error: %v", err)
 	}
 
 	// Handle different webhook events
@@ -101,8 +94,7 @@ func RazorpayWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	case "payment.error":
 		handlePaymentError(w, payload)
 	default:
-		// Acknowledge all webhooks even if we don't handle them
-		log.Printf("ℹ️  [WEBHOOK] Unhandled event type: %s - acknowledging anyway", payload.Event)
+		// Acknowledge all webhooks
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged", "event": payload.Event})
 	}
@@ -131,8 +123,6 @@ func handlePaymentCaptured(w http.ResponseWriter, payload RazorpayWebhookPayload
 	// Extract payment info directly from map
 	paymentMap, ok := payload.Payload["payment"].(map[string]interface{})
 	if !ok {
-		log.Printf("❌ Error: 'payment' key not found or invalid type in payload")
-		log.Printf("DEBUG: Full payload: %+v", payload.Payload)
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid payment data structure"})
 		return
@@ -140,8 +130,6 @@ func handlePaymentCaptured(w http.ResponseWriter, payload RazorpayWebhookPayload
 
 	entityMap, ok := paymentMap["entity"].(map[string]interface{})
 	if !ok {
-		log.Printf("❌ Error: 'entity' key not found or invalid type in payment")
-		log.Printf("DEBUG: Payment map: %+v", paymentMap)
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid entity data structure"})
 		return
@@ -151,27 +139,14 @@ func handlePaymentCaptured(w http.ResponseWriter, payload RazorpayWebhookPayload
 	paymentID, _ := entityMap["id"].(string)
 	orderID, _ := entityMap["order_id"].(string)
 
-	// Extract amount (could be float or int)
-	var amount int64
-	switch v := entityMap["amount"].(type) {
-	case float64:
-		amount = int64(v)
-	case int:
-		amount = int64(v)
-	}
-
 	if paymentID == "" || orderID == "" {
-		log.Printf("[WEBHOOK] Error: Empty paymentID or orderID")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Missing payment_id or order_id"})
 		return
 	}
 
-	log.Printf("Payment captured - Order: %s, Payment: %s, Amount: %d", orderID, paymentID, amount)
-
 	// Process payment in transaction
 	if err := processPaymentCaptured(orderID, paymentID, signature); err != nil {
-		log.Printf("[WEBHOOK] Error: %v", err)
 		// Update webhook processing status in database using webhook ID
 		if updateErr := updateWebhookProcessingStatus(payload.ID, "FAILED", err.Error()); updateErr != nil {
 			log.Printf("Error updating webhook status: %v", updateErr)
@@ -183,7 +158,7 @@ func handlePaymentCaptured(w http.ResponseWriter, payload RazorpayWebhookPayload
 
 	// Update webhook processing status as successful
 	if updateErr := updateWebhookProcessingStatus(payload.ID, "COMPLETED", ""); updateErr != nil {
-		log.Printf("[WEBHOOK] Status update error: %v", updateErr)
+		log.Printf("Error updating webhook status: %v", updateErr)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -200,7 +175,6 @@ func handlePaymentFailed(w http.ResponseWriter, payload RazorpayWebhookPayload) 
 	// Extract payment info directly from map
 	paymentMap, ok := payload.Payload["payment"].(map[string]interface{})
 	if !ok {
-		log.Printf("❌ Error: 'payment' key not found in failed payment webhook")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid payment data structure"})
 		return
@@ -208,7 +182,6 @@ func handlePaymentFailed(w http.ResponseWriter, payload RazorpayWebhookPayload) 
 
 	entityMap, ok := paymentMap["entity"].(map[string]interface{})
 	if !ok {
-		log.Printf("❌ Error: 'entity' key not found in failed payment")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid entity data structure"})
 		return
@@ -231,8 +204,6 @@ func handlePaymentFailed(w http.ResponseWriter, payload RazorpayWebhookPayload) 
 	}
 
 	errorMsg := fmt.Sprintf("%s: %s", errorCode, errorDesc)
-
-	log.Printf("[WEBHOOK] Payment failed: Order %s", orderID)
 
 	// Update payment status to FAILED
 	if err := updatePaymentStatusFailed(orderID, paymentID, errorMsg); err != nil {
@@ -261,7 +232,6 @@ func handlePaymentFailed(w http.ResponseWriter, payload RazorpayWebhookPayload) 
 
 // handlePaymentError handles payment.error event
 func handlePaymentError(w http.ResponseWriter, payload RazorpayWebhookPayload) {
-	log.Printf("Payment error webhook received: %+v", payload)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "acknowledged", "event": "payment.error"})
 }
@@ -270,12 +240,10 @@ func handlePaymentError(w http.ResponseWriter, payload RazorpayWebhookPayload) {
 func processPaymentCaptured(orderID, paymentID, signature string) error {
 	tx, err := db.DB.Begin()
 	if err != nil {
-		log.Printf("[WEBHOOK] Transaction error: %v", err)
 		return fmt.Errorf("error starting transaction: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			log.Printf("  [WEBHOOK] Rolling back transaction due to error")
 			tx.Rollback()
 		}
 	}()
@@ -290,157 +258,114 @@ func processPaymentCaptured(orderID, paymentID, signature string) error {
 	err = tx.QueryRow("SELECT student_id, amount, status FROM registration_payment WHERE order_id = $1", orderID).Scan(&studentID, &amount, &currentStatus)
 	if err == nil {
 		paymentType = PaymentTypeRegistration
-		log.Printf("  ✓ [WEBHOOK] Found in registration_payment - StudentID: %d, Amount: ₹%.2f, Status: %s", studentID, amount, currentStatus)
 	} else {
-		log.Printf("  ✗ [WEBHOOK] Not found in registration_payment: %v", err)
 		// Try course_payment
 		var courseID int
 
 		err = tx.QueryRow("SELECT student_id, course_id, amount, status FROM course_payment WHERE order_id = $1", orderID).Scan(&studentID, &courseID, &amount, &currentStatus)
 		if err != nil {
-			log.Printf("❌ [WEBHOOK] Payment not found in ANY table for order_id: %s", orderID)
-			log.Printf("    This means:")
-			log.Printf("    1. Payment never initiated via /initiate-payment")
-			log.Printf("    2. Order ID in webhook doesn't match database")
-			log.Printf("    3. Payment already deleted")
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
-			return fmt.Errorf("payment not found or already processed for order_id: %s", orderID)
+			return fmt.Errorf("payment not found for order_id: %s", orderID)
 		}
 		paymentType = PaymentTypeCourseFee
-		log.Printf("  ✓ [WEBHOOK] Found in course_payment - StudentID: %d, Amount: ₹%.2f, Status: %s", studentID, amount, currentStatus)
 	}
 
 	// Check if payment is already PAID (idempotency)
 	if currentStatus == "PAID" {
 		if err = tx.Commit(); err != nil {
-			log.Printf("❌ [WEBHOOK] Error committing transaction: %v", err)
 			return fmt.Errorf("error committing transaction: %w", err)
 		}
 
 		// Still publish the event in case it failed on the first webhook
-		log.Printf("  [WEBHOOK] Publishing payment.verified event to Kafka (retry)...")
 		publishPaymentVerifiedFromWebhook(studentID, orderID, paymentID, paymentType)
 
-		// For duplicate payments, do NOT reschedule the interview
-		// It was already scheduled on the first successful payment
-
-		log.Printf("✅ [WEBHOOK] Successfully handled duplicate/retry webhook - OrderID: %s, PaymentID: %s, StudentID: %d", orderID, paymentID, studentID)
 		return nil
 	}
 
-	log.Printf("  [WEBHOOK] Updating payment status to PAID (PaymentType: %s)", paymentType)
-
 	// Update payment status to PAID
 	if paymentType == PaymentTypeRegistration {
-		log.Printf("    Updating registration_payment table...")
 		_, err = tx.Exec(
 			"UPDATE registration_payment SET status = $1, payment_id = $2, razorpay_sign = $3, updated_at = CURRENT_TIMESTAMP WHERE order_id = $4",
 			"PAID", paymentID, signature, orderID)
 		if err != nil {
-			log.Printf("❌ [WEBHOOK] Error updating registration payment status: %v", err)
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
-			return fmt.Errorf("error updating registration payment status: %w", err)
+			return fmt.Errorf("error updating registration payment: %w", err)
 		}
 
 		// Get the registration_payment ID
 		var registrationPaymentID int
 		err = tx.QueryRow("SELECT id FROM registration_payment WHERE order_id = $1", orderID).Scan(&registrationPaymentID)
 		if err != nil {
-			log.Printf("  ⚠ [WEBHOOK] Warning retrieving registration_payment ID: %v", err)
+			log.Printf("Warning retrieving registration_payment ID: %v", err)
 		}
 
-		log.Printf("    ✓ registration_payment updated")
-
-		// Update student_lead registration_fee_status AND registration_payment_id
-		log.Printf("    Updating student_lead registration_fee_status and registration_payment_id...")
+		// Update student_lead registration_fee_status
 		_, err = tx.Exec(
 			"UPDATE student_lead SET registration_fee_status = 'PAID', registration_payment_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
 			registrationPaymentID, studentID)
 		if err != nil {
-			log.Printf("❌ [WEBHOOK] Error updating student registration fee status: %v", err)
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
-			return fmt.Errorf("error updating student registration fee status: %w", err)
-		} else {
-			log.Printf("    ✓ student_lead registration_fee_status and registration_payment_id updated")
+			return fmt.Errorf("error updating student registration fee: %w", err)
+		}
 
-			// Set interview_scheduled_at to 1 hour from now for registration payment
-			interviewTime := time.Now().Add(time.Hour)
-			log.Printf("    Setting interview_scheduled_at to: %s", interviewTime.Format(time.RFC3339))
-			_, err = tx.Exec(
-				"UPDATE student_lead SET interview_scheduled_at = $1, application_status = 'INTERVIEW_SCHEDULED', updated_at = CURRENT_TIMESTAMP WHERE id = $2",
-				interviewTime, studentID)
-			if err != nil {
-				log.Printf("❌ [WEBHOOK] Error updating student interview_scheduled_at: %v", err)
-				if rollbackErr := tx.Rollback(); rollbackErr != nil {
-					log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
-				}
-				return fmt.Errorf("error updating student interview_scheduled_at: %w", err)
-			} else {
-				log.Printf("    ✓ student_lead interview_scheduled_at set to: %s", interviewTime.Format(time.RFC3339))
+		// Set interview_scheduled_at to 1 hour from now
+		interviewTime := time.Now().Add(time.Hour)
+		_, err = tx.Exec(
+			"UPDATE student_lead SET interview_scheduled_at = $1, application_status = 'INTERVIEW_SCHEDULED', updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+			interviewTime, studentID)
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
+			return fmt.Errorf("error updating student interview: %w", err)
 		}
 	} else {
-		log.Printf("    Updating course_payment table...")
 		_, err = tx.Exec(
 			"UPDATE course_payment SET status = $1, payment_id = $2, razorpay_sign = $3, updated_at = CURRENT_TIMESTAMP WHERE order_id = $4",
 			"PAID", paymentID, signature, orderID)
 		if err != nil {
-			log.Printf("❌ [WEBHOOK] Error updating course payment status: %v", err)
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
-			return fmt.Errorf("error updating course payment status: %w", err)
+			return fmt.Errorf("error updating course payment: %w", err)
 		}
 
 		// Get the course_payment ID
 		var coursePaymentID int
 		err = tx.QueryRow("SELECT id FROM course_payment WHERE order_id = $1", orderID).Scan(&coursePaymentID)
 		if err != nil {
-			log.Printf("  ⚠ [WEBHOOK] Warning retrieving course_payment ID: %v", err)
+			log.Printf("Warning retrieving course_payment ID: %v", err)
 		}
 
-		log.Printf("    ✓ course_payment updated")
-
-		// Update student_lead course_fee_status AND course_payment_id
-		log.Printf("    Updating student_lead course_fee_status and course_payment_id...")
+		// Update student_lead course_fee_status
 		_, err = tx.Exec(
 			"UPDATE student_lead SET course_fee_status = 'PAID', course_payment_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
 			coursePaymentID, studentID)
 		if err != nil {
-			log.Printf("❌ [WEBHOOK] Error updating student course fee status: %v", err)
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				log.Printf("  [WEBHOOK] Rollback error: %v", rollbackErr)
+				log.Printf("Rollback error: %v", rollbackErr)
 			}
-			return fmt.Errorf("error updating student course fee status: %w", err)
-		} else {
-			log.Printf("    ✓ student_lead course_fee_status and course_payment_id updated")
+			return fmt.Errorf("error updating student course fee: %w", err)
 		}
 	}
 
-	log.Printf("  [WEBHOOK] Committing transaction...")
 	if err = tx.Commit(); err != nil {
-		log.Printf("❌ [WEBHOOK] Error committing transaction: %v", err)
 		return fmt.Errorf("error committing transaction: %w", err)
 	}
-	log.Printf("  ✓ Transaction committed successfully")
 
-	// Publish payment.verified event to Kafka (non-blocking)
-	log.Printf("  [WEBHOOK] Publishing payment.verified event to Kafka...")
+	// Publish payment.verified event to Kafka
 	publishPaymentVerifiedFromWebhook(studentID, orderID, paymentID, paymentType)
 
 	// If registration payment, schedule interview
 	if paymentType == PaymentTypeRegistration {
-		log.Printf("  [WEBHOOK] Scheduling interview after registration payment...")
 		scheduleInterviewAfterPayment(studentID)
 	}
-
-	log.Printf("✅ [WEBHOOK] Successfully processed payment captured - OrderID: %s, PaymentID: %s, StudentID: %d", orderID, paymentID, studentID)
 	return nil
 }
 

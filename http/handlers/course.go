@@ -22,7 +22,6 @@ func GetCourses(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, name, description, fee, duration, is_active, created_at, updated_at FROM course WHERE is_active = 1 ORDER BY id ASC`
 	rows, err := db.DB.QueryContext(r.Context(), query)
 	if err != nil {
-		log.Printf("Error fetching courses: %v", err)
 		response.ErrorResponse(w, http.StatusInternalServerError, "Error fetching courses")
 		return
 	}
@@ -32,7 +31,6 @@ func GetCourses(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var course models.Course
 		if err := rows.Scan(&course.ID, &course.Name, &course.Description, &course.Fee, &course.Duration, &course.IsActive, &course.CreatedAt, &course.UpdatedAt); err != nil {
-			log.Printf("Error scanning course: %v", err)
 			response.ErrorResponse(w, http.StatusInternalServerError, "Error processing courses")
 			return
 		}
@@ -40,12 +38,10 @@ func GetCourses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = rows.Err(); err != nil {
-		log.Printf("Error iterating courses: %v", err)
 		response.ErrorResponse(w, http.StatusInternalServerError, "Error processing courses")
 		return
 	}
 
-	log.Printf("Retrieved %d courses", len(courses))
 	response.SuccessResponse(w, http.StatusOK, fmt.Sprintf("Retrieved %d courses", len(courses)), courses)
 }
 
@@ -72,12 +68,10 @@ func GetCourseByID(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, name, description, fee, duration, is_active, created_at, updated_at FROM course WHERE id = $1`
 	err = db.DB.QueryRowContext(r.Context(), query, courseID).Scan(&course.ID, &course.Name, &course.Description, &course.Fee, &course.Duration, &course.IsActive, &course.CreatedAt, &course.UpdatedAt)
 	if err != nil {
-		log.Printf("Error retrieving course: %v", err)
 		response.ErrorResponse(w, http.StatusNotFound, "Course not found")
 		return
 	}
 
-	log.Printf("Retrieved course - ID: %d, Name: %s, Fee: ₹%.2f", course.ID, course.Name, course.Fee)
 	response.SuccessResponse(w, http.StatusOK, "Course retrieved", course)
 }
 

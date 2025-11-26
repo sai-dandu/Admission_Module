@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"admission-module/db"
 	"admission-module/http/response"
 	"admission-module/services"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -33,6 +35,22 @@ func ApplicationActionHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Status == "ACCEPTED" && req.SelectedCourseID == nil {
 		response.ErrorResponse(w, http.StatusBadRequest, "Selected course ID is required for acceptance")
+		return
+	}
+
+	// REQUIREMENT: Check if registration fee is PAID before allowing application status updates
+	var regPaymentStatus string
+	err := db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", req.StudentID).Scan(&regPaymentStatus)
+	if err == sql.ErrNoRows {
+		response.ErrorResponse(w, http.StatusBadRequest, "Registration payment record not found. Please complete registration fee payment first")
+		return
+	}
+	if err != nil {
+		response.ErrorResponse(w, http.StatusInternalServerError, "Error checking registration payment status")
+		return
+	}
+	if regPaymentStatus != "PAID" {
+		response.ErrorResponse(w, http.StatusBadRequest, "Application status cannot be updated. Registration payment status is "+regPaymentStatus+". Please complete registration fee payment first")
 		return
 	}
 

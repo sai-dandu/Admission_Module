@@ -4,7 +4,6 @@ import (
 	resp "admission-module/http/response"
 	"admission-module/services"
 	"encoding/json"
-	"log"
 	"net/http"
 )
 
@@ -51,7 +50,6 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	// Check payment eligibility
 	canPay, reason, err := paymentService.CheckPaymentEligibility(req.StudentID, req.PaymentType, req.CourseID)
 	if err != nil {
-		log.Printf("Error checking payment eligibility: %v", err)
 		resp.ErrorResponse(w, http.StatusBadRequest, reason)
 		return
 	}
@@ -68,7 +66,6 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 		CourseID:    req.CourseID,
 	})
 	if err != nil {
-		log.Printf("Payment validation error: %v", err)
 		resp.ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -76,14 +73,12 @@ func InitiatePaymentHandler(w http.ResponseWriter, r *http.Request) {
 	// Create Razorpay order
 	orderResp, err := paymentService.CreateRazorpayOrder(*preparedReq)
 	if err != nil {
-		log.Printf("Razorpay order creation error: %v", err)
 		resp.ErrorResponse(w, http.StatusInternalServerError, "Error creating payment order: "+err.Error())
 		return
 	}
 
 	// Save payment record
 	if err := paymentService.SavePaymentRecord(req.StudentID, orderResp.OrderID, *preparedReq); err != nil {
-		log.Printf("Error saving payment record: %v", err)
 		// Determine if this is a client error or server error
 		if err.Error() == "registration payment already completed - student has already paid registration fee" ||
 			err.Error() == "course payment already completed - student has already paid fee for course" {
@@ -154,7 +149,6 @@ func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
 		RazorpaySign: req.RazorpaySign,
 	})
 	if err != nil {
-		log.Printf("Error verifying payment: %v", err)
 		resp.ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -189,7 +183,6 @@ func GetPaymentStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	status, paymentType, studentID, err := paymentService.GetPaymentStatus(orderID)
 	if err != nil {
-		log.Printf("Error getting payment status: %v", err)
 		resp.ErrorResponse(w, http.StatusNotFound, "Payment not found for order_id: "+orderID)
 		return
 	}
