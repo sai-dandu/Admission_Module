@@ -210,9 +210,7 @@ func GetPaymentStatusHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", map[string]interface{}{
-			"data": paymentStatus,
-		})
+		resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", paymentStatus)
 		return
 	}
 

@@ -43,6 +43,7 @@ func SetupRoutes() {
 	http.HandleFunc("/course", middleware.EnableCORS(handlers.GetCourseByID))
 	http.HandleFunc("/create-course", middleware.EnableCORS(handlers.CreateCourse))
 	http.HandleFunc("/update-course", middleware.EnableCORS(handlers.UpdateCourse))
+	http.HandleFunc("/delete-course", middleware.EnableCORS(handlers.DeleteCourse))
 
 	// Payment APIs
 	http.HandleFunc("/initiate-payment", middleware.EnableCORS(handlers.InitiatePayment))
