@@ -170,3 +170,47 @@ func UpdateCourse(w http.ResponseWriter, r *http.Request) {
 		"course_id": req.ID,
 	})
 }
+
+// DeleteCourse deletes a course by marking it as inactive (soft delete)
+func DeleteCourse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		response.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	courseIDStr := r.URL.Query().Get("id")
+	if courseIDStr == "" {
+		response.ErrorResponse(w, http.StatusBadRequest, "Course ID is required")
+		return
+	}
+
+	courseID, err := strconv.Atoi(courseIDStr)
+	if err != nil {
+		response.ErrorResponse(w, http.StatusBadRequest, "Invalid course ID")
+		return
+	}
+
+	// Soft delete - mark as inactive
+	query := `UPDATE course SET is_active = 0, updated_at = $1 WHERE id = $2`
+	result, err := db.DB.ExecContext(r.Context(), query, time.Now(), courseID)
+	if err != nil {
+		log.Printf("Error deleting course: %v", err)
+		response.ErrorResponse(w, http.StatusInternalServerError, "Error deleting course")
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		response.ErrorResponse(w, http.StatusInternalServerError, "Error checking delete")
+		return
+	}
+
+	if rowsAffected == 0 {
+		response.ErrorResponse(w, http.StatusNotFound, "Course not found")
+		return
+	}
+
+	response.SuccessResponse(w, http.StatusOK, "Course deleted successfully", map[string]interface{}{
+		"course_id": courseID,
+	})
+}

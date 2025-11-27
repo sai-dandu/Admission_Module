@@ -440,3 +440,46 @@ func (s *PaymentService) CheckPaymentEligibility(studentID int, paymentType stri
 
 	return false, "Invalid payment type", fmt.Errorf("invalid payment type: %s", paymentType)
 }
+
+// PaymentStatusResponse represents payment status for a student
+type PaymentStatusResponse struct {
+	RegistrationStatus string `json:"registration_status"`
+	CourseFeeStatus    string `json:"course_status"`
+	RegistrationPaid   bool   `json:"registration_paid"`
+	CoursesFeesPaid    bool   `json:"course_fees_paid"`
+}
+
+// GetPaymentStatusByStudentID retrieves payment statuses for a student
+func (s *PaymentService) GetPaymentStatusByStudentID(studentID int) (*PaymentStatusResponse, error) {
+	var regStatus, courseStatus string
+	var courseStatusExists bool
+
+	// Get registration payment status
+	err := db.DB.QueryRow("SELECT status FROM registration_payment WHERE student_id = $1", studentID).Scan(&regStatus)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("error fetching registration payment status: %w", err)
+	}
+
+	// Get course payment status (latest one)
+	err = db.DB.QueryRow("SELECT status FROM course_payment WHERE student_id = $1 ORDER BY updated_at DESC LIMIT 1", studentID).Scan(&courseStatus)
+	if err == nil {
+		courseStatusExists = true
+	} else if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("error fetching course payment status: %w", err)
+	}
+
+	// Default to PENDING if not found
+	if regStatus == "" {
+		regStatus = "PENDING"
+	}
+	if !courseStatusExists {
+		courseStatus = "PENDING"
+	}
+
+	return &PaymentStatusResponse{
+		RegistrationStatus: regStatus,
+		CourseFeeStatus:    courseStatus,
+		RegistrationPaid:   regStatus == PaymentStatusPaid,
+		CoursesFeesPaid:    courseStatus == PaymentStatusPaid,
+	}, nil
+}

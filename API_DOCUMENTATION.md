@@ -3,8 +3,8 @@
 ## Overview
 
 **Base URL:** `http://localhost:8080`  
-**Version:** 2.1.0  
-**Last Updated:** November 26, 2025  
+**Version:** 2.2.0  
+**Last Updated:** November 26, 2025 (Payment Restrictions Update)  
 **Go Version:** 1.24  
 **Database:** PostgreSQL 12+  
 **Message Broker:** Apache Kafka  
@@ -265,11 +265,8 @@ Creates a new student lead and auto-assigns counselor.
   "message": "Lead created successfully",
   "data": {
     "student_id": 1,
-    "name": "John Doe",
-    "email": "john@example.com",
-    "phone": "+919876543210",
-    "counsellor_name": "Rishi",
-    "counsellor_email": "rishi@university.edu"
+    "counselor_name": "Rishi",
+    "email": "john@example.com"
   }
 }
 ```
@@ -359,7 +356,7 @@ Upload leads from Excel file (.xlsx).
 
 ## Payment Management
 
-### Payment Types
+### Payment Types & Restrictions
 
 | Aspect | Registration | Course Fee |
 |--------|--------------|-----------|
@@ -367,11 +364,31 @@ Upload leads from Excel file (.xlsx).
 | Trigger | Student registration | Course enrollment |
 | When PAID | Auto-schedule interview | Store course selection |
 | Database Table | registration_payment | course_payment |
+| **Restriction** | None | ⚠️ **REQUIRED:** Registration fee must be PAID first |
+
+### Payment Flow & Business Rules
+
+**Critical Restrictions Implemented:**
+1. **Course Fee Payment Restriction** ✅
+   - Student CANNOT pay course fee until registration fee status is `PAID`
+   - Error: `"Registration payment status is PENDING/FAILED. Please complete registration fee payment before proceeding with course fee payment"`
+
+2. **Interview Scheduling Restriction** ✅
+   - System CANNOT schedule interview unless registration fee is `PAID`
+   - Error: `"Interview cannot be scheduled. Registration payment status is PENDING/FAILED. Please complete registration fee payment first"`
+
+3. **Application Action Restriction** ✅
+   - Application status updates (Accept/Reject) ONLY allowed after registration fee is `PAID`
+   - Error: `"Application status cannot be updated. Registration payment status is PENDING/FAILED. Please complete registration fee payment first"`
 
 ### 1. Initiate Payment
 **POST** `/initiate-payment`
 
 Creates Razorpay order for payment.
+
+**Payment Type Requirements:**
+- `REGISTRATION`: No prerequisites
+- `COURSE_FEE`: Registration fee must be `PAID` ⚠️ (enforced by API)
 
 **Request (Registration):**
 ```json
@@ -394,13 +411,24 @@ Creates Razorpay order for payment.
 ```json
 {
   "status": "success",
-  "message": "Payment order created",
+  "message": "Payment order created successfully",
   "data": {
     "order_id": "order_Rh9Vc899yylv78",
     "amount": 1870.0,
     "currency": "INR",
-    "receipt": "rcpt_1_REGISTRATION"
+    "receipt": "rcpt_1_REGISTRATION",
+    "payment_type": "REGISTRATION",
+    "student_id": 1,
+    "message": "Please complete the payment using Razorpay"
   }
+}
+```
+
+**Error (400) - If course fee requested but registration fee not PAID:**
+```json
+{
+  "status": "error",
+  "error": "Registration payment status is PENDING. Please complete registration fee payment before proceeding with course fee payment"
 }
 ```
 
@@ -409,7 +437,7 @@ Creates Razorpay order for payment.
 ### 2. Verify Payment
 **POST** `/verify-payment`
 
-Verifies Razorpay signature and marks payment PAID.
+Verifies Razorpay signature. Database is updated ONLY when webhook arrives from Razorpay.
 
 **Request:**
 ```json
@@ -420,27 +448,26 @@ Verifies Razorpay signature and marks payment PAID.
 }
 ```
 
-**Response (200):**
+**Response (200) - Signature Valid:**
 ```json
 {
   "status": "success",
   "message": "Payment verified successfully",
   "data": {
-    "student_id": 1,
-    "order_id": "order_Rh9Vc899yylv78",
-    "status": "PAID"
+    "status": "success"
   }
 }
 ```
 
-**On Registration Payment PAID:**
-- Interview scheduled 1 hour later
-- Interview email sent via Kafka
-- `interview.schedule` event published
-
-**On Course Payment PAID:**
-- Course selection stored
-- Enrollment confirmation email sent
+⚠️ **Important Note:**
+- This endpoint performs **client-side verification only**
+- The actual database update happens when the webhook from Razorpay arrives (`payment.captured` event)
+- The webhook will:
+  1. Verify signature again (server-side)
+  2. Update database status to `PAID`
+  3. Publish `payment.verified` event to Kafka
+  4. Auto-schedule interview (if registration payment)
+- Status remains `PENDING` until webhook confirms
 
 ---
 
@@ -450,6 +477,8 @@ Verifies Razorpay signature and marks payment PAID.
 **POST** `/schedule-meet`
 
 Schedules Google Meet and sends link to student.
+
+**Prerequisite:** Registration fee payment status must be `PAID` ⚠️
 
 **Request:**
 ```json
@@ -471,6 +500,14 @@ Schedules Google Meet and sends link to student.
 }
 ```
 
+**Error (400) - If registration fee not PAID:**
+```json
+{
+  "status": "error",
+  "error": "Interview cannot be scheduled. Registration payment status is PENDING. Please complete registration fee payment first"
+}
+```
+
 ---
 
 ### 2. Application Decision
@@ -478,11 +515,14 @@ Schedules Google Meet and sends link to student.
 
 Accept or reject application with automated notifications.
 
+**Prerequisite:** Registration fee payment status must be `PAID` ⚠️
+
 **Request (Accept):**
 ```json
 {
   "student_id": 1,
-  "status": "ACCEPTED"
+  "status": "ACCEPTED",
+  "selected_course_id": 2
 }
 ```
 
@@ -498,7 +538,22 @@ Accept or reject application with automated notifications.
 ```json
 {
   "status": "success",
-  "message": "Application accepted and offer letter sent"
+  "message": "Application accepted successfully",
+  "data": {
+    "student_id": 1,
+    "student_name": "John Doe",
+    "student_email": "john@example.com",
+    "selected_course": "Advanced Python",
+    "course_id": 2,
+    "course_fee": 5000.0,
+    "next_step": "Please proceed with course fee payment",
+    "payment_details": {
+      "payment_type": "COURSE_FEE",
+      "amount": 5000.0,
+      "currency": "INR",
+      "course_id": 2
+    }
+  }
 }
 ```
 
@@ -506,27 +561,45 @@ Accept or reject application with automated notifications.
 ```json
 {
   "status": "success",
-  "message": "Application rejected and notification sent"
+  "message": "Application rejected successfully",
+  "data": {
+    "student_id": 1,
+    "student_name": "John Doe",
+    "student_email": "john@example.com",
+    "result": "rejected",
+    "notification": "Rejection email has been sent to the student"
+  }
+}
+```
+
+**Error (400) - If registration fee not PAID:**
+```json
+{
+  "status": "error",
+  "error": "Application status cannot be updated. Registration payment status is PENDING. Please complete registration fee payment first"
 }
 ```
 
 **Actions:**
 
 **ACCEPTED:**
-- Generates offer letter PDF
-- Sends with PDF attachment via Kafka
+- Validates registration fee is PAID
+- Stores course selection in `selected_course_id`
 - Updates `application_status` = ACCEPTED
+- Sends acceptance email via Kafka
+- Includes next step: course fee payment details
 
 **REJECTED:**
-- Sends rejection email via Kafka
+- Validates registration fee is PAID
 - Updates `application_status` = REJECTED
+- Sends rejection email via Kafka
 
 ---
 
 ## DLQ Management
 
 ### 1. Get DLQ Messages
-**GET** `/dlq-messages?limit=50`
+**GET** `/api/dlq/messages?limit=50`
 
 Retrieves failed email events.
 
@@ -537,7 +610,8 @@ Retrieves failed email events.
   "data": [
     {
       "id": 1,
-      "original_topic": "emails",
+      "topic": "emails",
+      "key": "student-1",
       "error_message": "SMTP timeout",
       "status": "FAILED",
       "retry_count": 0,
@@ -550,16 +624,9 @@ Retrieves failed email events.
 ---
 
 ### 2. Retry Failed Message
-**POST** `/retry-dlq-message`
+**POST** `/api/dlq/messages/retry/{message_id}`
 
 Retries a failed email event.
-
-**Request:**
-```json
-{
-  "message_id": 1
-}
-```
 
 **Response (200):**
 ```json
@@ -572,22 +639,29 @@ Retries a failed email event.
 ---
 
 ### 3. Resolve Message
-**POST** `/resolve-dlq-message`
+**POST** `/api/dlq/messages/resolve/{message_id}`
 
 Marks a message as resolved (acknowledged).
 
 **Request:**
 ```json
 {
-  "message_id": 1,
   "notes": "Manually resolved"
+}
+```
+
+**Response (200):**
+```json
+{
+  "status": "success",
+  "message": "Message resolved successfully"
 }
 ```
 
 ---
 
 ### 4. Get DLQ Statistics
-**GET** `/dlq-stats`
+**GET** `/api/dlq/stats`
 
 Retrieves DLQ statistics and metrics.
 
@@ -730,7 +804,45 @@ docker exec -it kafka kafka-console-consumer.sh \
 
 ---
 
-## Input Validation
+## Payment Restrictions & Business Rules
+
+### Restriction 1: Course Fee Payment Requires Registration Fee
+**Endpoint:** `POST /initiate-payment`
+
+Students cannot initiate course fee payments until the registration fee status is `PAID`.
+
+| Condition | Result |
+|-----------|--------|
+| Registration status: NOT_INITIATED | ❌ Error: "Registration payment not initiated. Please pay the registration fee first" |
+| Registration status: PENDING | ❌ Error: "Registration payment status is PENDING. Please complete registration fee payment before proceeding with course fee payment" |
+| Registration status: FAILED | ❌ Error: "Registration payment status is FAILED. Please complete registration fee payment before proceeding with course fee payment" |
+| Registration status: PAID | ✅ Course fee payment allowed |
+
+### Restriction 2: Interview Scheduling Requires Registration Fee
+**Endpoint:** `POST /schedule-meet`
+
+The system cannot schedule an interview unless the registration fee is `PAID`.
+
+| Condition | Result |
+|-----------|--------|
+| Registration status: NOT_INITIATED | ❌ Error: "Registration payment record not found. Please complete registration fee payment first" |
+| Registration status: PENDING | ❌ Error: "Interview cannot be scheduled. Registration payment status is PENDING. Please complete registration fee payment first" |
+| Registration status: FAILED | ❌ Error: "Interview cannot be scheduled. Registration payment status is FAILED. Please complete registration fee payment first" |
+| Registration status: PAID | ✅ Interview scheduling allowed |
+
+### Restriction 3: Application Actions Require Registration Fee
+**Endpoint:** `POST /application-action`
+
+Application status updates (Accept/Reject) are only allowed after the registration fee is `PAID`.
+
+| Condition | Result |
+|-----------|--------|
+| Registration status: NOT_INITIATED | ❌ Error: "Registration payment record not found. Please complete registration fee payment first" |
+| Registration status: PENDING | ❌ Error: "Application status cannot be updated. Registration payment status is PENDING. Please complete registration fee payment first" |
+| Registration status: FAILED | ❌ Error: "Application status cannot be updated. Registration payment status is FAILED. Please complete registration fee payment first" |
+| Registration status: PAID | ✅ Application action (Accept/Reject) allowed |
+
+---
 
 ### Email Format
 ```regex
@@ -820,6 +932,7 @@ curl -X POST http://localhost:8080/application-action \
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.2.0 | Nov 26, 2025 | **Payment Restrictions Implemented:** Course fee requires registration fee PAID, Interview scheduling requires registration fee PAID, Application actions require registration fee PAID |
 | 2.1.0 | Nov 26, 2025 | Complete Kafka email system, interview scheduling automation |
 | 2.0.0 | Nov 18, 2025 | Kafka integration, async emails |
 | 1.0.0 | Nov 1, 2025 | Initial release |

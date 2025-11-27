@@ -28,9 +28,16 @@ func ApplicationActionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Status != "ACCEPTED" && req.Status != "REJECTED" {
-		response.ErrorResponse(w, http.StatusBadRequest, "Invalid status. Must be ACCEPTED or REJECTED")
+	if req.Status != "ACCEPT" && req.Status != "REJECT" && req.Status != "ACCEPTED" && req.Status != "REJECTED" {
+		response.ErrorResponse(w, http.StatusBadRequest, "Invalid status. Must be ACCEPT, REJECT, ACCEPTED, or REJECTED")
 		return
+	}
+
+	// Normalize status values
+	if req.Status == "ACCEPT" {
+		req.Status = "ACCEPTED"
+	} else if req.Status == "REJECT" {
+		req.Status = "REJECTED"
 	}
 
 	if req.Status == "ACCEPTED" && req.SelectedCourseID == nil {

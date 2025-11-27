@@ -4,6 +4,7 @@ import (
 	resp "admission-module/http/response"
 	"admission-module/services"
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -166,33 +167,54 @@ func VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetPaymentStatusHandler returns the current payment status for an order
+// GetPaymentStatusHandler returns the current payment status for an order or student
 func GetPaymentStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		resp.ErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	orderID := r.URL.Query().Get("order_id")
-	if orderID == "" {
-		resp.ErrorResponse(w, http.StatusBadRequest, "order_id query parameter is required")
-		return
-	}
-
 	paymentService := services.NewPaymentService()
 
-	status, paymentType, studentID, err := paymentService.GetPaymentStatus(orderID)
-	if err != nil {
-		resp.ErrorResponse(w, http.StatusNotFound, "Payment not found for order_id: "+orderID)
+	// Check for order_id parameter first
+	orderID := r.URL.Query().Get("order_id")
+	if orderID != "" {
+		status, paymentType, studentID, err := paymentService.GetPaymentStatus(orderID)
+		if err != nil {
+			resp.ErrorResponse(w, http.StatusNotFound, "Payment not found for order_id: "+orderID)
+			return
+		}
+
+		resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", map[string]interface{}{
+			"order_id":     orderID,
+			"status":       status,
+			"payment_type": paymentType,
+			"student_id":   studentID,
+		})
 		return
 	}
 
-	resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", map[string]interface{}{
-		"order_id":     orderID,
-		"status":       status,
-		"payment_type": paymentType,
-		"student_id":   studentID,
-	})
+	// Check for student_id parameter
+	studentIDStr := r.URL.Query().Get("student_id")
+	if studentIDStr != "" {
+		var studentID int
+		_, err := fmt.Sscanf(studentIDStr, "%d", &studentID)
+		if err != nil {
+			resp.ErrorResponse(w, http.StatusBadRequest, "Invalid student_id format")
+			return
+		}
+
+		paymentStatus, err := paymentService.GetPaymentStatusByStudentID(studentID)
+		if err != nil {
+			resp.ErrorResponse(w, http.StatusNotFound, err.Error())
+			return
+		}
+
+		resp.SuccessResponse(w, http.StatusOK, "Payment status retrieved successfully", paymentStatus)
+		return
+	}
+
+	resp.ErrorResponse(w, http.StatusBadRequest, "Either order_id or student_id query parameter is required")
 }
 
 // Backward compatibility wrappers

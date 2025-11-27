@@ -10,6 +10,8 @@ import (
 // ScheduleMeet creates a meeting invite for the given email and stores meet_link in database.
 // Instead of using Google Calendar API, it generates a simple meeting link and sends an email with the details.
 func ScheduleMeet(studentID int, email string) (string, error) {
+	log.Printf("[MEET] Scheduling meeting for student %d (%s)", studentID, email)
+
 	// Generate a unique meeting ID using timestamp
 	meetID := fmt.Sprintf("%d", time.Now().Unix())
 
@@ -34,24 +36,30 @@ func ScheduleMeet(studentID int, email string) (string, error) {
 		meetLink,
 	)
 
-	// Send the meeting invite via email
+	subject := fmt.Sprintf("Meeting Scheduled for %s", meetTime.Format("Jan 2, 2006 3:04 PM"))
+
+	// Send the meeting invite via email (using Kafka queue)
+	log.Printf("[MEET] Sending meeting email to %s with subject: %s", email, subject)
 	err := SendEmail(
 		email,
-		fmt.Sprintf("Meeting Scheduled for %s", meetTime.Format("Jan 2, 2006 3:04 PM")),
+		subject,
 		emailBody,
 	)
 	if err != nil {
+		log.Printf("[MEET] ❌ Failed to queue meeting email for student %d: %v", studentID, err)
 		return "", fmt.Errorf("failed to send meeting invite: %w", err)
 	}
+
+	log.Printf("[MEET] ✅ Meeting email queued successfully for student %d", studentID)
 
 	// Store meet_link in student_lead table
 	_, err = db.DB.Exec(
 		"UPDATE student_lead SET meet_link = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
 		meetLink, studentID)
 	if err != nil {
-		log.Printf("Warning: failed to store meet_link in database: %v", err)
+		log.Printf("[MEET] ⚠️  Warning: failed to store meet_link in database for student %d: %v", studentID, err)
 	} else {
-		log.Printf("✅ meet_link stored in database: %s", meetLink)
+		log.Printf("[MEET] ✅ Meet link stored in database: %s", meetLink)
 	}
 
 	return meetLink, nil

@@ -364,6 +364,7 @@ func processPaymentCaptured(orderID, paymentID, signature string) error {
 
 	// If registration payment, schedule interview
 	if paymentType == PaymentTypeRegistration {
+		log.Printf("[WEBHOOK] Scheduling interview for student %d after registration payment", studentID)
 		scheduleInterviewAfterPayment(studentID)
 	}
 	return nil
@@ -493,9 +494,11 @@ func scheduleInterviewAfterPayment(studentID int) {
 		var name, email string
 		err := db.DB.QueryRow("SELECT name, email FROM student_lead WHERE id = $1", studentID).Scan(&name, &email)
 		if err != nil {
-			log.Printf("Error fetching student details: %v", err)
+			log.Printf("[INTERVIEW] Error fetching student details for ID %d: %v", studentID, err)
 			return
 		}
+
+		log.Printf("[INTERVIEW] Publishing interview.schedule event for student %d (%s)", studentID, email)
 
 		// Publish interview.schedule event to emails topic (for unified Kafka consumer processing)
 		evt := map[string]interface{}{
@@ -506,7 +509,9 @@ func scheduleInterviewAfterPayment(studentID int) {
 			"ts":         time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := Publish("emails", fmt.Sprintf("student-%d", studentID), evt); err != nil {
-			log.Printf("Warning: failed to publish interview.schedule event: %v", err)
+			log.Printf("[INTERVIEW] ❌ Failed to publish interview.schedule event for student %d: %v", studentID, err)
+		} else {
+			log.Printf("[INTERVIEW] ✅ Interview.schedule event published successfully for student %d", studentID)
 		}
 	}()
 }
